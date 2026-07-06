@@ -1,0 +1,45 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{.CSRF}}">
+  <title>{{.Title}}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { font-size: 1.4rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eee; font-size: .9rem; }
+    th { background: #f6f6f6; }
+    .field { margin: .6rem 0; }
+    label { display: block; font-size: .85rem; color: #555; margin-bottom: .2rem; }
+    input[type=text], input[type=password], input[type=number] { width: 100%; padding: .4rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: .4rem .8rem; border: 1px solid #888; background: #f6f6f6; border-radius: 4px; cursor: pointer; }
+    button.primary { background: #2a6df4; color: white; border-color: #2a6df4; }
+    a { color: #2a6df4; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; padding: .5rem 0; border-bottom: 1px solid #eee; margin-bottom: 1rem; }
+    .muted { color: #888; font-size: .8rem; }
+    .error { color: #b00020; font-size: .9rem; }
+    .actions form { display: inline; }
+    .badge { display: inline-block; padding: .1rem .4rem; border-radius: 3px; font-size: .75rem; background: #eee; }
+    .badge.pending { background: #fff3cd; color: #856404; }
+    .badge.disabled { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/admin/"><strong>wgserver</strong></a>
+    {{if .Sess}}
+      <span>
+        {{.Sess.Username}} &middot;
+        <form method="post" action="/admin/logout" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+          <button type="submit">logout</button>
+        </form>
+      </span>
+    {{end}}
+  </div>
+  {{template "content" .}}
+</body>
+</html>{{end}}

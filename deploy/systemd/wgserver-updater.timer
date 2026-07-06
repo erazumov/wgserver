@@ -1,0 +1,15 @@
+[Unit]
+Description=wgserver auto-updater (hourly check)
+Documentation=https://github.com/erazumov/wgserver
+
+[Timer]
+# Run hourly, 5 minutes after boot to give the network a chance to come
+# up. Persistent=true catches missed runs across reboots.
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+AccuracySec=1min
+Unit=wgserver-updater.service
+
+[Install]
+WantedBy=timers.target

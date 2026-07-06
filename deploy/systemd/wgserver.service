@@ -1,0 +1,26 @@
+[Unit]
+Description=wgserver: self-hosted WireGuard gateway
+Documentation=https://github.com/erazumov/wgserver
+After=network-online.target wg-quick@wg0.service wg-quick@wg1.service
+Wants=network-online.target wg-quick@wg0.service
+Requires=wg-quick@wg1.service
+
+[Service]
+Type=simple
+# Run as a dedicated system user so its outbound traffic (e.g. the
+# Telegram bot's long-poll to api.telegram.org) can be policy-routed
+# via the exit WG through a uidrange ip rule (see wg0.conf PostUp).
+# CAP_NET_ADMIN is needed for the syncer to call `wg set` on wg1.
+User=wgserver
+Group=wgserver
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+EnvironmentFile=/etc/wgserver/wgserver.env
+ExecStart=/usr/local/bin/wgserver serve -config /etc/wgserver/wgserver.yaml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

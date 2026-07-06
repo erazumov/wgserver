@@ -1,0 +1,18 @@
+/bin/
+/dist/
+*.log
+
+# Local config with real secrets
+wgserver.yaml
+wgserver.env
+.env
+.env.*
+
+# Deploy secrets (copy deploy.env.example to deploy.env)
+deploy/deploy.env
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store

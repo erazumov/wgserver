@@ -1,0 +1,53 @@
+# golangci-lint config for wgserver.
+# Run: make lint
+# Install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+#
+# Keep the enabled set tight: errcheck, govet, staticcheck, revive,
+# bodyclose, ineffassign, unused, misspell. These are mostly free of
+# false positives on a small Go project.
+
+version: "2"
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck      # unchecked errors
+    - govet         # built-in vet
+    - staticcheck   # SA-class bugs
+    - revive        # golint successor
+    - bodyclose     # http body Close
+    - ineffassign   # ineffectual assignment
+    - unused        # unused declarations
+    - misspell      # typos in comments
+    - gocritic      # opinionated style/performance nits, default checks
+    - gosimple      # simplifications
+  disable:
+    - exhaustruct   # too noisy for our style
+    - cyclop        # we don't enforce a single cyclomatic number
+    - gochecknoglobals
+    - gochecknoinits
+    - mnd           # magic numbers — we use small ones in tests
+
+linters-settings:
+  misspell:
+    locale: US,RU
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-tags:
+      - experimental
+      - opinionated
+
+issues:
+  # Don't fail on issues in vendored or test-fixture code.
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - revive
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,21 @@
+[Unit]
+Description=wgserver auto-updater (one-shot)
+Documentation=https://github.com/erazumov/wgserver
+# Do not block the timer on the wgserver service: the updater restarts
+# wgserver as part of its work, and we want systemd to release the
+# wgserver service quickly so the new binary can grab the port.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/wgserver/wgserver.env
+ExecStart=/usr/local/bin/wgserver-updater -config /etc/wgserver/wgserver.yaml
+StandardOutput=journal
+StandardError=journal
+# Reasonable upper bound; the actual run completes in a few seconds
+# except when downloading (network bound).
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target

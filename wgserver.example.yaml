@@ -1,0 +1,54 @@
+# wgserver example config. Copy to wgserver.yaml and fill in real values.
+# wgserver.yaml is gitignored — never commit real secrets/tokens.
+
+http:
+  # Admin UI listen address. Plain HTTP (set tls_* below to enable HTTPS).
+  # If unix_socket is set, this is ignored.
+  addr: "127.0.0.1:8080"
+  # Optional: bind admin UI to a UNIX socket instead of a TCP port.
+  # Recommended for production — no public-facing port to firewall.
+  # unix_socket: "/var/run/wgserver/admin.sock"
+  # Optional: serve the admin UI over HTTPS. Both must be set together.
+  # tls_cert_file: "/etc/wgserver/admin.crt"
+  # tls_key_file:  "/etc/wgserver/admin.key"
+  # /healthz on a separate plain-HTTP TCP port so the auto-updater
+  # can poll it. Required when admin is on a UNIX socket or TLS.
+  # If empty and admin is plain HTTP, /healthz rides on the admin port.
+  health_addr: "127.0.0.1:9090"
+
+db:
+  path: "/var/lib/wgserver/db.sqlite"
+
+# Outbound WireGuard peer — all client traffic is routed through it.
+exit_wg:
+  interface: "wg0"
+  listen_port: 51820
+  address: "10.0.0.1/24"
+  peer:
+    endpoint: "REPLACE_WITH_EXIT_WG_HOST:51820"
+    public_key: "REPLACE_WITH_EXIT_WG_PUBKEY_BASE64="
+    allowed_ips: "0.0.0.0/0"
+    persistent_keepalive: 25
+
+# Per-client WireGuard interface. Clients peer here; traffic is forwarded
+# out via exit_wg. Do not add client peers to exit_wg.
+clients:
+  interface: "wg1"
+  listen_port: 51821
+  address: "10.0.1.1/24"
+  cidr: "10.0.1.0/24"
+  dns_servers:
+    - "1.1.1.1"
+    - "9.9.9.9"
+  endpoint: "REPLACE_WITH_PUBLIC_HOST:51821"
+  public_key: "REPLACE_WITH_WG1_PUBLIC_KEY_BASE64="
+
+telegram:
+  bot_token: "REPLACE_WITH_TELEGRAM_BOT_TOKEN"
+  group_chat_id: 0
+  per_user_quota: 2
+
+update:
+  enabled: true
+  github_repo: "erazumov/wgserver"
+  check_interval_minutes: 60

@@ -1,0 +1,36 @@
+{{define "content"}}
+<h1>peers</h1>
+<p class="muted">client traffic is routed through exit_wg (wg0). each peer here is peered on wg1.</p>
+<p><a href="/admin/peers/new">+ new peer</a></p>
+{{if .Peers}}
+<table>
+  <thead>
+    <tr><th>id</th><th>name</th><th>ip</th><th>created</th><th>state</th><th></th></tr>
+  </thead>
+  <tbody>
+    {{range .Peers}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td>{{.Name}}</td>
+      <td>{{.AssignedIP}}</td>
+      <td><span class="muted">{{.CreatedAt}}</span></td>
+      <td>
+        {{if .Disabled}}<span class="badge disabled">disabled</span>{{else if .PendingSync}}<span class="badge pending">pending sync</span>{{else}}<span class="badge">active</span>{{end}}
+      </td>
+      <td class="actions">
+        <a href="/admin/peers/{{.ID}}/config">.conf</a>
+        {{if not .Disabled}}
+          <form method="post" action="/admin/peers/{{.ID}}/revoke">
+            <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+            <button type="submit">revoke</button>
+          </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">no peers yet.</p>
+{{end}}
+{{end}}

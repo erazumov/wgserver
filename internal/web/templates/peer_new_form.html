@@ -1,0 +1,23 @@
+{{define "form"}}
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+<form method="post" action="/admin/peers"
+      hx-post="/admin/peers"
+      hx-target="this"
+      hx-swap="outerHTML">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <div class="field">
+    <label for="name">name</label>
+    <input type="text" id="name" name="name" autofocus required>
+    <span class="muted">a friendly label. e.g. "alice-laptop".</span>
+  </div>
+  <div class="field">
+    <label>
+      <input type="checkbox" name="generate_psk" checked>
+      generate preshared key
+    </label>
+    <span class="muted">extra entropy on the .conf; recommended for untrusted networks. cannot be turned on later — peer must be recreated.</span>
+  </div>
+  <button type="submit" class="primary">create</button>
+  <a href="/admin/">cancel</a>
+</form>
+{{end}}
