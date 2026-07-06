@@ -238,23 +238,32 @@ cat > "$WG0_CONF" <<EOF
 # managed by wgserver install.sh
 # Do NOT add per-client peers here — they belong on wg1.
 # See the install.sh comment block above for the routing model.
+#
+# Table, PostUp and PreDown are wg-quick extensions and MUST live in
+# [Interface]. wg-quick only strips wg-quick-specific keys from
+# [Interface]; if you put them in [Peer] they are passed verbatim to
+# wg setconf, which does not understand them and fails with
+# "Line unrecognized: 'Table=off'".
 [Interface]
 PrivateKey = ${WG0_PRIV}
 ListenPort = 51820
 Address = 10.0.0.1/24
+Table = off
+# NB: we use "del ... || true; add ..." rather than "replace" because
+# iproute2 <6.4 (Debian 12 ships 6.1.0) does not implement
+# "ip rule replace". Same end-state, works on every iproute2.
+PostUp = ip -4 route replace default dev %i table ${WG_ROUTING_TABLE}; ip -4 rule del from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO} 2>/dev/null || true; ip -4 rule add from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO}; ip -4 rule del uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO} 2>/dev/null || true; ip -4 rule add uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO}
+PreDown = ip -4 rule del uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO} || true; ip -4 rule del from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO} || true; ip -4 route del default dev %i table ${WG_ROUTING_TABLE} || true
 
 [Peer]
 # exit_wg (upstream WireGuard). Forwarded client traffic and the
 # wgserver daemon's own traffic are routed through it via table
-# ${WG_ROUTING_TABLE} (see PostUp). The host's own traffic (SSH,
-# ping, apt) is NOT affected.
+# ${WG_ROUTING_TABLE} (see [Interface] PostUp above). The host's
+# own traffic (SSH, ping, apt) is NOT affected.
 PublicKey = ${EXIT_WG_PUBKEY}
 Endpoint = ${EXIT_WG_ENDPOINT}
 AllowedIPs = 0.0.0.0/0
-Table = off
 PersistentKeepalive = 25
-PostUp = ip -4 route replace default dev %i table ${WG_ROUTING_TABLE}; ip -4 rule replace from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO}; ip -4 rule replace uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO}
-PreDown = ip -4 rule del uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO} || true; ip -4 rule del from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO} || true; ip -4 route del default dev %i table ${WG_ROUTING_TABLE} || true
 EOF
 chmod 0600 "$WG0_CONF"
 
@@ -355,11 +364,22 @@ systemctl enable --now wg-quick@wg1.service
 # 7. wgserver dirs
 # -----------------------------------------------------------------------------
 mkdir -p "$ETC_WGSERVER" "$VAR_WGSERVER"
-chmod 0700 "$ETC_WGSERVER" "$VAR_WGSERVER"
-# wgserver.service runs as the wgserver user (see section 11): the
-# DB and CSRF key live under /var/lib/wgserver and must be writable
-# by that user. chown is idempotent — safe to re-run.
+chmod 0700 "$VAR_WGSERVER"
 chown -R wgserver:wgserver "$VAR_WGSERVER"
+# psk/ holds per-peer preshared-key files. The syncer writes a PSK
+# to psk/<safe-pubkey> and passes that path to `wg set`; wireguard-tools
+# 1.0.20210914 (Debian 12) only accepts a file path for preshared-key.
+# Must be chowned: mkdir happens after the chown -R above and would
+# otherwise leave it root:root.
+mkdir -p "$VAR_WGSERVER/psk"
+chown wgserver:wgserver "$VAR_WGSERVER/psk"
+chmod 0700 "$VAR_WGSERVER/psk"
+# /etc/wgserver stays root-owned (config is operator-edited), but
+# the wgserver daemon must be able to read it. chgrp + 0750 lets the
+# wgserver user traverse the directory; individual file perms
+# (set below) control read access.
+chown root:wgserver "$ETC_WGSERVER"
+chmod 0750 "$ETC_WGSERVER"
 
 # -----------------------------------------------------------------------------
 # 8. binary

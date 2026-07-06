@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -80,11 +81,13 @@ func newTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func newTestLoop(db *sql.DB, r runner) *Loop {
+func newTestLoop(t *testing.T, db *sql.DB, r runner) *Loop {
+	t.Helper()
 	return &Loop{
 		DB:        db,
 		Runner:    r,
 		Interface: "wg1",
+		PSKDir:    t.TempDir(),
 		Logger:    log.New(io.Discard, "", 0),
 		Interval:  time.Hour,
 	}
@@ -116,7 +119,7 @@ func peerState(t *testing.T, db *sql.DB, id int64) (pending bool, disabled bool)
 func TestRunOnce_EmptyNoCalls(t *testing.T) {
 	db := newTestDB(t)
 	r := &fakeRunner{}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 	if err := l.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -128,7 +131,7 @@ func TestRunOnce_EmptyNoCalls(t *testing.T) {
 func TestRunOnce_AddsNewPeer(t *testing.T) {
 	db := newTestDB(t)
 	r := &fakeRunner{}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 
 	id := seedPeer(t, db, store.Peer{
 		Name: "alice", PublicKey: "PUBKEY_A", PrivateKey: "PRIV_A",
@@ -160,7 +163,7 @@ func TestRunOnce_AddsNewPeer(t *testing.T) {
 func TestRunOnce_RemovesDisabledPeer(t *testing.T) {
 	db := newTestDB(t)
 	r := &fakeRunner{}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 
 	id := seedPeer(t, db, store.Peer{
 		Name: "alice", PublicKey: "PUBKEY_A", PrivateKey: "PRIV_A",
@@ -200,7 +203,7 @@ func TestRunOnce_RemovesDisabledPeer(t *testing.T) {
 func TestRunOnce_PreservesPresharedKey(t *testing.T) {
 	db := newTestDB(t)
 	r := &fakeRunner{}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 
 	psk := "PSK_BASE64"
 	seedPeer(t, db, store.Peer{
@@ -216,16 +219,28 @@ func TestRunOnce_PreservesPresharedKey(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("calls = %v, want 1", calls)
 	}
-	want := "wg set wg1 peer PUBKEY_A allowed-ips 10.0.1.2/32 preshared-key PSK_BASE64"
-	if calls[0] != want {
-		t.Errorf("call = %q, want %q", calls[0], want)
+	// The wireguard-tools 1.0.20210914 `wg set preshared-key` only
+	// accepts a file path, so the syncer must have written the PSK to
+	// a file and passed that path. Verify the arg shape and that the
+	// file exists with the PSK content.
+	const wantPrefix = "wg set wg1 peer PUBKEY_A allowed-ips 10.0.1.2/32 preshared-key "
+	if !strings.HasPrefix(calls[0], wantPrefix) {
+		t.Errorf("call = %q, want prefix %q", calls[0], wantPrefix)
+	}
+	pskPath := strings.TrimPrefix(calls[0], wantPrefix)
+	body, err := os.ReadFile(pskPath)
+	if err != nil {
+		t.Fatalf("read psk file %q: %v", pskPath, err)
+	}
+	if got := strings.TrimRight(string(body), "\n"); got != psk {
+		t.Errorf("psk file content = %q, want %q", got, psk)
 	}
 }
 
 func TestRunOnce_OnErrorPeerStaysPending(t *testing.T) {
 	db := newTestDB(t)
 	r := &fakeRunner{err: errors.New("wg set failed")}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 
 	id := seedPeer(t, db, store.Peer{
 		Name: "alice", PublicKey: "PUBKEY_A", PrivateKey: "PRIV_A",
@@ -246,7 +261,7 @@ func TestRunOnce_OnErrorPeerStaysPending(t *testing.T) {
 func TestRunOnce_ContinuesOnError(t *testing.T) {
 	db := newTestDB(t)
 	r := &countingRunner{failN: 1}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 
 	idA := seedPeer(t, db, store.Peer{
 		Name: "a", PublicKey: "PUBKEY_A", PrivateKey: "PVA",
@@ -281,7 +296,7 @@ func TestRunOnce_ContinuesOnError(t *testing.T) {
 func TestRunOnce_AllPending(t *testing.T) {
 	db := newTestDB(t)
 	r := &fakeRunner{}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 
 	for i := 1; i <= 3; i++ {
 		seedPeer(t, db, store.Peer{
@@ -303,7 +318,7 @@ func TestRunOnce_AllPending(t *testing.T) {
 func TestRun_StopsOnContextCancel(t *testing.T) {
 	db := newTestDB(t)
 	r := &fakeRunner{}
-	l := newTestLoop(db, r)
+	l := newTestLoop(t, db, r)
 	l.Interval = 10 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())

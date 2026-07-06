@@ -20,8 +20,14 @@ type Loop struct {
 	DB        *sql.DB
 	Runner    Runner
 	Interface string
-	Logger    *log.Logger
-	Interval  time.Duration
+	// PSKDir is the directory the syncer writes per-peer preshared-key
+	// files into. wireguard-tools 1.0.20210914 (Debian 12) requires
+	// the `preshared-key` value of `wg set` to be a file path; the syncer
+	// writes the PSK here and passes the path. Must be writable by the
+	// wgserver user.
+	PSKDir   string
+	Logger   *log.Logger
+	Interval time.Duration
 }
 
 // RunOnce pulls every peer with pending_sync=1 and reconciles it with
@@ -50,13 +56,13 @@ func (l *Loop) RunOnce(ctx context.Context) error {
 func (l *Loop) applyOne(ctx context.Context, p store.Peer) error {
 	var err error
 	if p.Disabled {
-		err = wg.RemovePeer(l.Runner, l.Interface, p.PublicKey)
+		err = wg.RemovePeer(l.Runner, l.Interface, l.PSKDir, p.PublicKey)
 	} else {
 		psk := ""
 		if p.PresharedKey != nil {
 			psk = *p.PresharedKey
 		}
-		err = wg.AddPeer(l.Runner, l.Interface, p.PublicKey, p.AssignedIP, psk)
+		err = wg.AddPeer(l.Runner, l.Interface, p.PublicKey, p.AssignedIP, l.PSKDir, psk)
 	}
 	if err != nil {
 		return err

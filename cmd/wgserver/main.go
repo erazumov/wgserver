@@ -152,12 +152,19 @@ func serve(cfg *config.Config) error {
 	// accumulated while the server was down; subsequent ticks handle
 	// new admin/TG actions. The loop shares the same context as the
 	// HTTP server so a SIGINT stops both.
+	//
+	// PSKDir holds per-peer preshared-key files. wireguard-tools
+	// 1.0.20210914 (Debian 12) requires the `preshared-key` value of
+	// `wg set` to be a file path; the syncer writes each peer's PSK
+	// here and passes the path. install.sh creates the directory
+	// under /var/lib/wgserver/.
 	syncCtx, syncCancel := context.WithCancel(context.Background())
 	defer syncCancel()
 	loop := &syncer.Loop{
 		DB:        db,
 		Runner:    wg.ExecRunner{},
 		Interface: cfg.Clients.Interface,
+		PSKDir:    filepath.Join(filepath.Dir(cfg.DB.Path), "psk"),
 		Logger:    log.Default(),
 		Interval:  5 * time.Second,
 	}
