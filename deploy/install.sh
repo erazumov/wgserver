@@ -501,12 +501,18 @@ install_tproxy_routes
 # rules / routes for TPROXY are NOT in iptables-save — those
 # are loaded by a small helper script from the systemd unit
 # (see section 13).
+#
+# iptables-save writes the file to /etc/wgserver/iptables.rules, but
+# the /etc/wgserver/ directory itself is created in section 9
+# (wgserver dirs). Without this mkdir -p, the first install on a
+# fresh host dies with "No such file or directory" before section 9
+# ever runs. mkdir -p is idempotent — section 9's later mkdir
+# does no harm.
 log "saving iptables ruleset → $IPTABLES_RULES"
+mkdir -p "$(dirname "$IPTABLES_RULES")"
 iptables-save -c > "$IPTABLES_RULES"
 chmod 0600 "$IPTABLES_RULES"
-log "saving iptables ruleset → $IPTABLES_RULES"
-iptables-save -c > "$IPTABLES_RULES"
-chmod 0600 "$IPTABLES_RULES"
+chown root:wgserver "$IPTABLES_RULES"
 
 # -----------------------------------------------------------------------------
 # 9. wgserver dirs
