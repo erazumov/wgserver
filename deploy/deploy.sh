@@ -121,11 +121,12 @@ run env GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" \
   -o "$BIN_DIR/wgserver-updater-linux-amd64" ./cmd/wgserver-updater
 
 # ---- upload ----
-log "uploading binaries + install.sh to $DEPLOY_HOST:$REMOTE_TMP"
+log "uploading binaries + install.sh + healthcheck to $DEPLOY_HOST:$REMOTE_TMP"
 run scp -q \
   "$BIN_DIR/wgserver-linux-amd64" \
   "$BIN_DIR/wgserver-updater-linux-amd64" \
   "$REPO_ROOT/deploy/install.sh" \
+  "$REPO_ROOT/deploy/wgserver-healthcheck.sh" \
   "$DEPLOY_HOST:$REMOTE_TMP/"
 
 # ---- install (server-side) ----
@@ -138,6 +139,16 @@ log "uploading deploy.env to $DEPLOY_HOST:$REMOTE_TMP/"
 run scp -q "$ENV_FILE" "$DEPLOY_HOST:$REMOTE_TMP/deploy.env"
 log "running install.sh on $DEPLOY_HOST"
 run ssh "$DEPLOY_HOST" "set -a && . $REMOTE_TMP/deploy.env && set +a && bash $REMOTE_TMP/install.sh $REMOTE_TMP/wgserver-linux-amd64"
+
+# Install the healthcheck to a stable path on the server. The
+# install.sh script doesn't touch /usr/local/bin (it stays in
+# the wgserver namespace under /var/lib/wgserver etc.); the
+# healthcheck is intentionally global so any operator can run
+# it via sudo without hunting for the file. The remote /tmp
+# copy from the scp above is the source; this is the real
+# installation.
+log "installing wgserver-healthcheck to /usr/local/bin/ on $DEPLOY_HOST"
+run ssh "$DEPLOY_HOST" "install -m 0755 $REMOTE_TMP/wgserver-healthcheck.sh /usr/local/bin/wgserver-healthcheck"
 
 # ---- updater ----
 if [ "$ENABLE_UPDATER" = "1" ]; then

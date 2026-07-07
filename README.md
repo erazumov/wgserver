@@ -240,16 +240,12 @@ to any operator-controlled file. Set `NO_NET=1` to skip the two
 
 ### How to run it on the server
 
-The script is in the repo, not on the host. After install, get it
-onto the server once and put it somewhere stable:
-
-```bash
-# from the mac (or wherever you build):
-scp deploy/wgserver-healthcheck.sh root@vpn.example.com:/usr/local/bin/wgserver-healthcheck
-
-# on the server:
-chmod +x /usr/local/bin/wgserver-healthcheck
-```
+The script is bundled with `deploy.sh`: every deploy copies
+`deploy/wgserver-healthcheck.sh` to the host's `/tmp/` and
+installs it to `/usr/local/bin/wgserver-healthcheck` (mode 0755)
+automatically. After any deploy, it's already there — no manual
+scp needed. On a host that was deployed before the healthcheck
+existed, do it once:
 
 Then any time you suspect something is off:
 
