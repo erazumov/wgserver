@@ -255,16 +255,16 @@ Then any time you suspect something is off:
 
 ```bash
 # from the server (or via ssh):
-sudo wgserver-healthcheck
+sudo /usr/local/bin/wgserver-healthcheck
 # or for a script-friendly machine-readable output:
-sudo wgserver-healthcheck --json | jq
+sudo /usr/local/bin/wgserver-healthcheck --json | jq
 ```
 
 The script can also be run via `deploy.sh` automatically on every
 deploy by adding a one-liner at the end of your deploy script:
 
 ```bash
-ssh "$DEPLOY_HOST" "wgserver-healthcheck" || exit 1
+ssh "$DEPLOY_HOST" "/usr/local/bin/wgserver-healthcheck" || exit 1
 ```
 
 (That makes a failed healthcheck fail the deploy, so a broken
@@ -424,7 +424,7 @@ If DNS hangs:
   ip route show table 100
   # must show: local 0.0.0.0/0 dev lo
   ```
-  If any of these is missing, run `deploy/wgserver-healthcheck.sh`
+  If any of these is missing, run `sudo /usr/local/bin/wgserver-healthcheck`
   for the full diagnostic.
 - The client may have a stale DNS cache. Disconnect the VPN,
   `sudo dscacheutil -flushcache` (macOS) or `sudo resolvectl
@@ -489,7 +489,7 @@ sudo -u wgserver curl -sS --max-time 5 https://ifconfig.io
 # should return the VLESS server's IP, not the host's
 
 # full diagnostic (the healthcheck script)
-sudo wgserver-healthcheck
+  sudo /usr/local/bin/wgserver-healthcheck
 ```
 
 If a client is connected but traffic isn't flowing:
