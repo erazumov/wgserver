@@ -80,9 +80,10 @@ chmod 0640 /etc/xray/config.json
 ```
 
 **The `address` field must resolve from the host** (system DNS, not
-through xray). If your VLESS server is at a private hostname like
-`89.125.75.183.ru`, put the literal IP instead. The installer
-warns but does not rewrite this — get it right before starting.
+through xray). If your VLESS server is at a non-public hostname
+(e.g. one that exists only on the VLESS-provider's internal DNS),
+put the literal IP instead. The installer warns but does not
+rewrite this — get it right before starting.
 
 ### 2. A Telegram bot (only if you want the bot)
 
@@ -194,7 +195,7 @@ sudo -u wgserver curl -sS --max-time 10 https://ifconfig.io
 
 # 3. Host's own traffic does NOT go through VLESS
 curl -sS --max-time 5 https://ifconfig.io
-# → returns the host's public IP (e.g. 89.191.225.59)
+# → returns the host's public IP (e.g. 203.0.113.10)
 
 # 4. Create an admin
 wgserver create-admin -username admin
@@ -277,12 +278,12 @@ mtime matches the latest build, then `systemctl restart wgserver`.
 ## Architecture in one diagram
 
 ```
-[wg client] ──(WireGuard)──> wgserver host (eth0=89.191.225.59)
+[wg client] ──(WireGuard)──> wgserver host (eth0=<public-ip>)
                               │
                               ├─ wg0 (10.0.1.1/24) — single iface, peers in store
                               │
                               ├─ xray :127.0.0.1:10808 (dokodemo-door)
-                              │       └─ outbound: vless+reality → 89.125.75.183.ru:443
+                              │       └─ outbound: vless+reality → <vless-server>:443
                               │
                               └─ iptables (this host, not eth0):
                                     PREROUTING -i wg0 -p tcp -j REDIRECT --to-ports 10808

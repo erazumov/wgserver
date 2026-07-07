@@ -148,7 +148,7 @@ func newTestBot(t *testing.T) (*Bot, *fakeSender) {
 		PerUserQuota:    2,
 		Logger:          log.New(io.Discard, "", 0),
 		ServerPublicKey: "WG1_PUB_BASE64",
-		ServerEndpoint:  "taigaproxy.example.com:51821",
+		ServerEndpoint:  "vpn.example.com:51820",
 		DNSServers:      []string{"1.1.1.1", "9.9.9.9"},
 		CIDR:            "10.0.1.0/24",
 		ServerAddr:      "10.0.1.1/24",
@@ -229,7 +229,7 @@ func TestHandleUpdate_StartInGroup_ClaimsAndSendsConf(t *testing.T) {
 		"PrivateKey = FAKE_PRIV",
 		"Address = 10.0.1.2/32",
 		"PublicKey = WG1_PUB_BASE64",
-		"Endpoint = taigaproxy.example.com:51821",
+		"Endpoint = vpn.example.com:51820",
 		"DNS = 1.1.1.1, 9.9.9.9",
 		"AllowedIPs = 0.0.0.0/0, ::/0",
 		"PersistentKeepalive = 25",
@@ -373,7 +373,7 @@ func (s *syncBuffer) String() string {
 func TestStartupCheck_BothOK(t *testing.T) {
 	bot, fs := newTestBot(t)
 	bot.GroupChatID = -1001
-	fs.me = &BotInfo{ID: 42, Username: "meshdrop_bot", FirstName: "connectme", IsBot: true}
+	fs.me = &BotInfo{ID: 42, Username: "testbot", FirstName: "Test", IsBot: true}
 	fs.chat = &Chat{ID: -1001, Title: "vpn-gateway", Type: "supergroup"}
 
 	logger, buf := captureLogger()
@@ -383,7 +383,7 @@ func TestStartupCheck_BothOK(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"getMe OK",
-		"@meshdrop_bot",
+		"@testbot",
 		"getChat OK",
 		"vpn-gateway",
 		"supergroup",

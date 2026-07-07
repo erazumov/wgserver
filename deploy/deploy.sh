@@ -7,7 +7,7 @@
 #   ./deploy/deploy.sh --dry-run          # print what would happen, do nothing
 #
 # Required in env (file or shell):
-#   DEPLOY_HOST                  ssh target, e.g. root@taigaproxy
+#   DEPLOY_HOST                  ssh target, e.g. root@vpn.example.com
 #   WGSERVER_TG_BOT_TOKEN        Telegram bot token (can be empty to disable bot)
 #   WGSERVER_TG_CHAT_ID          group chat id (0 to disable bot)
 # Optional:
@@ -74,7 +74,7 @@ command -v ssh >/dev/null || die "ssh not in PATH"
 command -v scp >/dev/null || die "scp not in PATH"
 
 # ---- required inputs ----
-: "${DEPLOY_HOST:?DEPLOY_HOST is required (e.g. root@taigaproxy)}"
+: "${DEPLOY_HOST:?DEPLOY_HOST is required (e.g. root@vpn.example.com)}"
 : "${WGSERVER_TG_BOT_TOKEN:=}"
 : "${WGSERVER_TG_CHAT_ID:=0}"
 : "${WGSERVER_TG_QUOTA:=2}"

@@ -119,7 +119,7 @@ XRAY_VERSION=${WGSERVER_XRAY_VERSION:-}
 # WGSERVER_PUBLIC_ENDPOINT is what every client .conf will get
 # written into the [Peer] Endpoint = ... line. The default
 # $(hostname) is almost always wrong: on most hosts $(hostname)
-# returns the short local name (e.g. "taigaproxy", "vpn1") that
+# returns the short local name (e.g. "vpn-host", "vpn1") that
 # does not resolve from the public internet. The operator MUST
 # either set this env var to a publicly-resolvable FQDN or to the
 # host's public IP literal. We do not try to autodetect the
