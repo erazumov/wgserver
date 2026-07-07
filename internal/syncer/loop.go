@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/erazumov/wgserver/internal/store"
@@ -30,15 +31,31 @@ type Loop struct {
 	Interval time.Duration
 }
 
-// RunOnce pulls every peer with pending_sync=1 and reconciles it with
-// the WireGuard interface. On success the row is marked synced; on
-// failure the row stays pending and the next tick will retry — never
-// silently desync. See AGENTS.md invariant.
+// RunOnce reconciles DB state with the WireGuard kernel state in
+// two passes:
 //
-// RunOnce never returns an error: per-peer failures are logged and the
-// loop continues with the next peer. The return value exists so the
-// caller can distinguish "DB read failed" (return non-nil) from "all
-// peers processed (some may have failed at the wg layer)".
+//  1. Pending pass: pull every peer with pending_sync=1 from the DB
+//     and apply it (add or remove). On success mark the row synced;
+//     on failure leave it pending and continue with the next peer.
+//     This is the original reactive pass — admin actions and Telegram
+//     bot claims land here.
+//
+//  2. Reconcile pass: pull the current peer set from the kernel via
+//     `wg show <iface> peers` and compare it to the set of non-
+//     disabled peers in the DB. For any DB peer that the kernel has
+//     lost, re-apply it. This catches divergence that the pending
+//     pass cannot: if wg-quick@<iface> was restarted (by deploy.sh
+//     upgrade, manual `systemctl restart wg-quick@wg0`, or an
+//     operator's `wg syncconf`), the kernel peer list is wiped but
+//     the DB still records pending_sync=0 for every peer — so the
+//     pending pass has nothing to do. Without reconciliation, those
+//     peers stay unreachable on the kernel until the next admin
+//     action sets pending_sync=1 again. See AGENTS.md invariant
+//     "WireGuard state changes are not transactional with the DB".
+//
+// Per-peer failures in either pass are logged and skipped — never
+// silently desync. RunOnce never returns an error from per-peer
+// failures; it only returns non-nil if the DB read itself fails.
 func (l *Loop) RunOnce(ctx context.Context) error {
 	pending, err := store.ListPeersPendingSync(ctx, l.DB)
 	if err != nil {
@@ -49,6 +66,11 @@ func (l *Loop) RunOnce(ctx context.Context) error {
 			l.Logger.Printf("syncer: peer %d (%s) %v", p.ID, p.PublicKey, err)
 			continue
 		}
+	}
+	if err := l.reconcile(ctx); err != nil {
+		// Reconciliation failures are not fatal: the next tick will
+		// retry, and pending apply above is unaffected. Log and move on.
+		l.Logger.Printf("syncer: reconcile: %v", err)
 	}
 	return nil
 }
@@ -71,6 +93,57 @@ func (l *Loop) applyOne(ctx context.Context, p store.Peer) error {
 		return fmt.Errorf("mark synced: %w", err)
 	}
 	return nil
+}
+
+// reconcile re-applies any enabled DB peer that the kernel has lost.
+// See RunOnce for the rationale. Errors fetching either side are
+// returned to the caller (which logs and continues); per-peer apply
+// errors are logged and skipped so one bad row does not block the rest.
+func (l *Loop) reconcile(ctx context.Context) error {
+	kernelPeers, err := l.currentWGPeers(ctx)
+	if err != nil {
+		return err
+	}
+	dbPeers, err := store.ListEnabledPeers(ctx, l.DB)
+	if err != nil {
+		return fmt.Errorf("list enabled: %w", err)
+	}
+	for _, p := range dbPeers {
+		if _, ok := kernelPeers[p.PublicKey]; ok {
+			continue
+		}
+		// The peer exists in the DB but the kernel has lost it
+		// (typically because wg-quick was restarted and the empty
+		// wg0.conf was reloaded). Re-apply so the tunnel comes back.
+		// applyOne marks the row synced on success, but a divergence
+		// re-detection on the next tick is cheap and correct.
+		if err := l.applyOne(ctx, p); err != nil {
+			l.Logger.Printf("syncer: reconcile peer %d (%s) %v", p.ID, p.PublicKey, err)
+			continue
+		}
+		l.Logger.Printf("syncer: reconcile re-added peer %d (%s) (was missing from kernel)", p.ID, p.PublicKey)
+	}
+	return nil
+}
+
+// currentWGPeers parses `wg show <iface> peers` output (one base64
+// public key per line) into a set for O(1) membership checks in the
+// reconciliation pass. An empty output (no peers configured, or
+// `wg show` returned an empty string) is a valid result, not an error.
+func (l *Loop) currentWGPeers(ctx context.Context) (map[string]struct{}, error) {
+	out, err := l.Runner.Output("wg", "show", l.Interface, "peers")
+	if err != nil {
+		return nil, fmt.Errorf("wg show %s peers: %w", l.Interface, err)
+	}
+	set := make(map[string]struct{})
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		set[line] = struct{}{}
+	}
+	return set, nil
 }
 
 // Run drives the loop until ctx is cancelled. One immediate RunOnce is

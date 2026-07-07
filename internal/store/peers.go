@@ -111,6 +111,19 @@ func ListPeersPendingSync(ctx context.Context, db *sql.DB) ([]Peer, error) {
 		FROM peers WHERE pending_sync = 1 ORDER BY id`)
 }
 
+// ListEnabledPeers returns every non-disabled peer regardless of
+// pending_sync. Used by the syncer's reconciliation pass to detect
+// divergence between DB and kernel state (e.g. after wg-quick@<iface>
+// was restarted and the kernel peer list was wiped, but the DB still
+// records pending_sync=0 because the syncer had nothing to retry).
+func ListEnabledPeers(ctx context.Context, db *sql.DB) ([]Peer, error) {
+	return listPeers(ctx, db, `SELECT
+		id, name, public_key, private_key, preshared_key, assigned_ip,
+		created_at, expires_at, disabled, pending_sync,
+		created_by_admin_id, created_by_telegram_user_id
+		FROM peers WHERE disabled = 0 ORDER BY id`)
+}
+
 func listPeers(ctx context.Context, db *sql.DB, query string) ([]Peer, error) {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
