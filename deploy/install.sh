@@ -745,13 +745,16 @@ set -e
 TPROXY_MARK=0x1
 TPROXY_TABLE=100
 
-# Remove any pre-existing rules (handles duplicates from earlier
+# Remove ALL pre-existing rules (handles duplicates from earlier
 # runs where the script errored out partway, or from operators
-# who ran the script manually multiple times).
-ip -4 rule  del fwmark ${TPROXY_MARK}/${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null || true
-# Add fresh.
+# who ran the script manually multiple times). A single `del` only
+# removes one rule — to converge to exactly one rule after every
+# run we need a `while` loop that runs until `del` returns non-zero
+# (no more matching rules).
+while ip -4 rule  del fwmark ${TPROXY_MARK}/${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null; do :; done
+# Add exactly one.
 ip -4 rule  add fwmark ${TPROXY_MARK}/${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null || true
-ip -4 route del local 0.0.0.0/0 dev lo table ${TPROXY_TABLE}      2>/dev/null || true
+while ip -4 route del local 0.0.0.0/0 dev lo table ${TPROXY_TABLE}      2>/dev/null; do :; done
 ip -4 route add local 0.0.0.0/0 dev lo table ${TPROXY_TABLE}      2>/dev/null || true
 TPROXY_EOF
 chmod 0755 /etc/wgserver/tproxy-routes.sh

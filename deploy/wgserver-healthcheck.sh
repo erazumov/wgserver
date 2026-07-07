@@ -305,7 +305,7 @@ else
   record "ip rule: fwmark $TPROXY_MARK/$TPROXY_MARK lookup $TPROXY_TABLE" fail "missing" \
     "systemctl restart wgserver-iptables (runs tproxy-routes.sh)"
 fi
-if ip route show table "$TPROXY_TABLE" 2>/dev/null | grep -qE "^local 0\.0\.0\.0/0 dev lo"; then
+if ip route show table "$TPROXY_TABLE" 2>/dev/null | grep -qE "^local (default|0\.0\.0\.0/0) dev lo"; then
   record "ip route table $TPROXY_TABLE: local 0.0.0.0/0 dev lo" ok
 else
   record "ip route table $TPROXY_TABLE: local 0.0.0.0/0 dev lo" fail "missing"
