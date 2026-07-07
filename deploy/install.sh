@@ -385,7 +385,8 @@ FIRST_INBOUND_LISTEN=$(jq -r '.inbounds[0].listen // ""' "$XRAY_CONF")
 FIRST_INBOUND_PORT=$(jq -r '.inbounds[0].port // ""' "$XRAY_CONF")
 
 [ "$FIRST_INBOUND_PROTO" = "dokodemo-door" ] \
-  || die "first inbound protocol must be \"dokodemo-door\" (got \"$FIRST_INBOUND_PROTO\"). SOCKS / mixed / http do not work with iptables REDIRECT."
+  || die "first inbound protocol must be \"dokodemo-door\" (got \"$FIRST_INBOUND_PROTO\"). SOCKS / mixed / http do not work with iptables REDIRECT." \
+       "Fix: jq '.inbounds[0] |= (.protocol = \"dokodemo-door\" | .settings = {\"network\": \"tcp,udp\", \"followRedirect\": true})' $XRAY_CONF > /tmp/xc && mv /tmp/xc $XRAY_CONF && chown root:xray $XRAY_CONF && chmod 0640 $XRAY_CONF && systemctl restart xray"
 
 [ "$FIRST_INBOUND_LISTEN" = "127.0.0.1" ] \
   || die "first inbound listen must be \"127.0.0.1\" (got \"$FIRST_INBOUND_LISTEN\")."
