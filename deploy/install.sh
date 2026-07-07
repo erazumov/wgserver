@@ -160,7 +160,14 @@ apt-get update -qq
 # jq: validation of /etc/xray/config.json (the operator's VLESS Reality profile).
 # iptables: REDIRECT rules for transparent proxying.
 # wireguard-tools: wg + wg-quick (kernel module handles the WG data plane).
-apt-get install -y -qq wireguard-tools iptables curl ca-certificates xz-utils jq
+# sudo: not strictly required for the wgserver daemon (it runs as a
+#   dedicated user with CAP_NET_ADMIN), but the healthcheck script
+#   (deploy/wgserver-healthcheck.sh) is intended to be run by an
+#   operator and uses sudo internally to read iptables, wg show,
+#   journalctl, systemctl — install it so the healthcheck works
+#   on a fresh minimal host. We do NOT configure any sudoers
+#   rules here; that's the operator's call.
+apt-get install -y -qq wireguard-tools iptables curl ca-certificates xz-utils jq sudo
 
 command -v wg >/dev/null         || die "wg not in PATH after install"
 command -v wg-quick >/dev/null   || die "wg-quick not in PATH after install"

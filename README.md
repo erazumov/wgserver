@@ -213,6 +213,40 @@ REDIRECT rule is missing — re-apply `wgserver-iptables.service`
 (`systemctl restart wgserver-iptables`) and check
 `iptables -t nat -S | grep uid-owner`.
 
+## Health check
+
+A comprehensive diagnostic script is provided at
+`deploy/wgserver-healthcheck.sh`. Run as root after install
+(or any time something looks off):
+
+```bash
+sudo bash deploy/wgserver-healthcheck.sh
+# or with machine-readable JSON:
+sudo bash deploy/wgserver-healthcheck.sh --json
+```
+
+The script checks ~25 conditions across:
+
+- **Preflight** — `wg`, `iptables`, `jq`, `ss`, `ip`, `systemctl`, `curl`
+- **systemd** — `xray`, `wgserver`, `wg-quick@wg0`, `wgserver-iptables`
+- **wg0** — interface present, state UP, listen-port, public-key vs `wgserver.yaml`
+- **xray config** — `/etc/xray/config.json` exists, readable, perms `0640 root:xray`; first inbound is `dokodemo-door` on `127.0.0.1:10808` with `followRedirect: true` and `network: tcp,udp`; VLESS outbound address resolvable
+- **iptables** — `PREROUTING -i wg0 -p tcp REDIRECT :10808`, `PREROUTING -i wg0 -p udp TPROXY mark=0x1 :10808`, `OUTPUT uid=999 -p tcp REDIRECT :10808`, `OUTPUT uid=999 -p udp` (REDIRECT or TPROXY)
+- **TPROXY delivery** — `ip rule` with `fwmark 0x1/0x1 lookup 100`, `ip route table 100` with `local 0.0.0.0/0 dev lo`
+- **persistence** — `/etc/wgserver/iptables.rules` exists, non-empty, age < 24h
+- **wgserver.yaml** — has `public_key` and `endpoint`; `endpoint` is not the default `$(hostname)`
+- **outbound** — host's `curl ifconfig.io` returns the public IP, daemon's (`sudo -u wgserver`) returns a **different** IP (the VLESS server's). If they match, the proxy is not working.
+- **xray activity** — `tunneling request` in the last 1m
+- **bot self-test** — `getMe OK` + `getChat OK` in the last 24h
+- **peer activity** — at least one wg handshake recorded (warns if zero)
+- **xray binary** — present and runs
+
+Output: per-check `✓` / `✗` / `⚠` with a one-line `fix:` when available,
+plus a summary line. Exit codes: `0` all OK, `1` at least one FAIL,
+`2` only WARN. The script is **strictly read-only** — it never writes
+to any operator-controlled file. Set `NO_NET=1` to skip the two
+`ifconfig.io` checks in air-gapped environments.
+
 ## Common issues
 
 ### xray exits with `status=23/n.a` and "permission denied" on `/etc/xray/config.json`
