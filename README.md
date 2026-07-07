@@ -16,6 +16,90 @@ bot. See [AGENTS.md](AGENTS.md) for invariants and design rationale.
 The rest of this README is what you need to do **before** step 4
 to make step 4 actually work.
 
+## Quick reference
+
+One-page summary of all the commands an operator actually needs.
+Bookmark this section.
+
+### File locations on the host
+
+| Path | What |
+|---|---|
+| `/usr/local/bin/wgserver` | wgserver daemon binary (overwritten on every `deploy.sh`) |
+| `/usr/local/bin/wgserver-updater` | auto-updater binary (if `ENABLE_UPDATER=1`) |
+| `/usr/local/bin/wgserver-healthcheck` | healthcheck script (deployed by every `deploy.sh`) |
+| `/usr/local/xray/xray` | xray-core binary |
+| `/etc/wgserver/wgserver.yaml` | daemon config (operator-editable, **never overwritten** if exists) |
+| `/etc/wgserver/wgserver.env` | env vars (`WGSERVER_VERSION=...` for auto-update pin) |
+| `/etc/wgserver/iptables.rules` | iptables snapshot, loaded at boot by `wgserver-iptables.service` |
+| `/etc/wgserver/tproxy-routes.sh` | helper for TPROXY ip rule + route, loaded at boot |
+| `/etc/xray/config.json` | xray config (operator-managed, **never touched** by install.sh) |
+| `/etc/wireguard/wg0.conf` | wg0 interface config (auto-rewritten on upgrade, old version saved to `wg0.conf.bak.<ts>`) |
+| `/var/lib/wgserver/db.sqlite` | SQLite database (peers, admins, telegram users, per-user quota) |
+
+### Daily commands
+
+```bash
+# full diagnostic — exit 0/1/2, 25+ checks, run as root
+sudo /usr/local/bin/wgserver-healthcheck
+
+# machine-readable, for scripts / monitoring
+sudo /usr/local/bin/wgserver-healthcheck --json | jq
+
+# service control
+sudo systemctl status wgserver xray wg-quick@wg0 wgserver-iptables
+sudo systemctl restart wgserver xray     # new binary / new unit
+sudo systemctl restart wg-quick@wg0      # new wg0 PostUp
+sudo systemctl restart wgserver-iptables # re-apply iptables + TPROXY routes
+                                          #   (CAUTION: iptables-restore
+                                          #    wipes any operator-added
+                                          #    rules like SSH exemption)
+
+# live logs (any one of these, Ctrl-C to exit)
+sudo journalctl -u wgserver -f
+sudo journalctl -u xray -f
+sudo journalctl -u wg-quick@wg0 -f
+
+# state inspection
+sudo wg show wg0
+sudo wg show wg0 latest-handshakes
+sudo wg show wg0 transfer
+sudo iptables -t nat -S | grep wg0
+sudo iptables -t mangle -S | grep wg0
+ip rule show
+ip route show table 100
+sudo ss -tlnp | grep 10808   # xray listening
+sudo ss -ulnp | grep 51820   # wg0 listening
+
+# sanity: does the daemon's own outbound actually go through VLESS?
+sudo -u wgserver curl -sS --max-time 5 https://ifconfig.io
+# should return the VLESS server's public IP, NOT the host's
+
+# create a new admin
+sudo /usr/local/bin/wgserver create-admin -username <name>
+# (prompts for password if -password not given)
+```
+
+### Updating to a new version
+
+```bash
+# from your dev machine:
+git pull
+make build
+./deploy/deploy.sh
+# → builds linux/amd64 binaries
+# → scp's new wgserver + wgserver-updater + install.sh + healthcheck
+# → ssh ... install.sh (preserves wg0 keys, upgrades xray, restarts services)
+# → /healthz check
+```
+
+To pin the daemon to a specific version (skip auto-updates):
+```bash
+# on the host, edit /etc/wgserver/wgserver.env
+sudo sed -i 's/^# WGSERVER_VERSION=.*/WGSERVER_VERSION=v1.2.3/' /etc/wgserver/wgserver.env
+sudo systemctl restart wgserver
+```
+
 ## Required manual setup BEFORE `install.sh`
 
 The bootstrap script is mostly idempotent but a few things must
