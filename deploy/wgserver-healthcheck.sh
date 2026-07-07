@@ -154,10 +154,16 @@ done
 header "wg0"
 if ip link show wg0 >/dev/null 2>&1; then
   record "wg0 interface present" ok
-  if ip -o link show wg0 2>/dev/null | grep -q "state UP"; then
+  # Check the IFF_UP flag in the link flags (works for wg0 where
+  # operstate is always UNKNOWN, unlike physical interfaces).
+  # Output of `ip -o link show wg0` is:
+  #   12: wg0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1420 ... state UNKNOWN ...
+  # The UP flag is between < and > — UNKNOWN is the operstate which
+  # would be a false negative.
+  if ip -o link show wg0 2>/dev/null | grep -qE '<[^>]*UP[,>]'; then
     record "wg0 state UP" ok
   else
-    record "wg0 state UP" fail "interface exists but not UP" "systemctl restart wg-quick@wg0"
+    record "wg0 state UP" fail "IFF_UP not set in <flags>" "systemctl restart wg-quick@wg0"
   fi
   listen_port=$(wg show wg0 listen-port 2>/dev/null || true)
   if [ "$listen_port" = "51820" ]; then
@@ -338,7 +344,10 @@ if [ -f "$WG_YAML" ]; then
   else
     record "$WG_YAML has public_key and endpoint" fail
   fi
-  endpoint=$(awk '/endpoint:/ {gsub(/[" ]/,""); print $2; exit}' "$WG_YAML")
+  # awk -F'"' splits on double quotes — for `endpoint: "1.2.3.4:51820"`
+  # the second field is exactly the value. Robust against leading
+  # spaces, comments, and unquoted values.
+  endpoint=$(grep -E '^[[:space:]]*endpoint:' "$WG_YAML" | head -1 | awk -F'"' '{print $2}')
   short_host=$(hostname -s 2>/dev/null || hostname)
   if [ -n "$endpoint" ] && [ "$endpoint" != "${short_host}:51820" ]; then
     record "endpoint not default (\$hostname)" ok "endpoint=$endpoint"
