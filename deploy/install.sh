@@ -576,10 +576,27 @@ install_tproxy_routes() {
   ip -4 route add local 0.0.0.0/0 dev lo table "$TPROXY_TABLE" 2>/dev/null || true
 }
 
+install_masquerade_peers() {
+  # Opt-in: classic WG-as-router behaviour for traffic that xray
+  # doesn't proxy (ICMP, anything xray-core rejects). Source-NATs
+  # peer traffic from $CLIENTS_CIDR going anywhere except back to
+  # the peer subnet, so the public internet can route replies.
+  # Default off — see AGENTS.md "no MASQUERADE" and the comment
+  # in deploy.env.example for the design trade-off. Idempotent.
+  if [ "${WGSERVER_MASQUERADE_PEERS:-0}" = "1" ]; then
+    iptables -t nat -C POSTROUTING -s "$CLIENTS_CIDR" ! -d "$CLIENTS_CIDR" -j MASQUERADE 2>/dev/null \
+      || iptables -t nat -A POSTROUTING -s "$CLIENTS_CIDR" ! -d "$CLIENTS_CIDR" -j MASQUERADE
+    log "MASQUERADE for peer subnet (WGSERVER_MASQUERADE_PEERS=1)"
+  else
+    log "MASQUERADE for peer subnet: disabled (WGSERVER_MASQUERADE_PEERS=0)"
+  fi
+}
+
 log "installing OUTPUT transparent-proxy rules (uid=${WGSERVER_UID} → :${XRAY_INBOUND_PORT})"
 install_output_rules
 log "installing TPROXY routing rules (fwmark=${TPROXY_MARK} → table ${TPROXY_TABLE} → local)"
 install_tproxy_routes
+install_masquerade_peers
 
 # Persist the running iptables ruleset (nat + mangle + filter)
 # across reboots via wgserver-iptables.service. iptables-save
