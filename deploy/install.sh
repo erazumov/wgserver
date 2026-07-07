@@ -245,7 +245,13 @@ write_keypair() {
 if [ -f "$WG0_CONF" ]; then
   log "wg0.conf already exists; preserving server keys"
   WG0_PRIV=$(awk '/^PrivateKey/ {print $3; exit}' "$WG0_CONF")
-  WG0_PUB=$(printf '%s' "$WG0_PRIV" | wg pubkey)
+  if [ -z "$WG0_PRIV" ]; then
+    warn "wg0.conf has no PrivateKey; generating fresh keypair (existing peers will be orphaned)"
+    WG0_PUB=$(write_keypair /etc/wireguard/wg0.key)
+    WG0_PRIV=$(cat /etc/wireguard/wg0.key)
+  else
+    WG0_PUB=$(printf '%s' "$WG0_PRIV" | wg pubkey)
+  fi
 else
   log "generating wg0 server keypair"
   WG0_PUB=$(write_keypair /etc/wireguard/wg0.key)
@@ -255,7 +261,15 @@ fi
 CLIENTS_SUBNET=10.0.1.0/24   # MUST match Address = 10.0.1.1/24 below
 CLIENTS_ADDR=10.0.1.1/24
 
-cat > "$WG0_CONF" <<EOF
+# Build the new wg0.conf in a temp file, then decide whether to
+# install it. This protects operator manual edits (e.g. an SSH-to-
+# self exemption added to PostUp) from being silently clobbered on
+# every install.sh run — the previous version is timestamped-back
+# up before overwrite, and the operator can `diff` to recover their
+# changes.
+NEW_WG0_CONF=$(mktemp)
+chmod 0600 "$NEW_WG0_CONF"
+cat > "$NEW_WG0_CONF" <<EOF
 # managed by wgserver install.sh
 # SINGLE WireGuard interface. Per-client peers are NOT listed here
 # — the wgserver sync-loop calls 'wg set wg0 peer <pubkey>
@@ -274,7 +288,19 @@ Address = ${CLIENTS_ADDR}
 PostUp =  iptables -t nat -C PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT} 2>/dev/null || iptables -t nat -A PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT}; iptables -t mangle -C PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} 2>/dev/null || iptables -t mangle -A PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT}
 PreDown = iptables -t nat -D PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT} 2>/dev/null || true; iptables -t mangle -D PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} 2>/dev/null || true
 EOF
-chmod 0600 "$WG0_CONF"
+
+if [ -f "$WG0_CONF" ] && cmp -s "$WG0_CONF" "$NEW_WG0_CONF"; then
+  log "wg0.conf unchanged; skipping rewrite"
+  rm -f "$NEW_WG0_CONF"
+elif [ -f "$WG0_CONF" ]; then
+  WG0_CONF_BACKUP="${WG0_CONF}.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -p "$WG0_CONF" "$WG0_CONF_BACKUP"
+  log "wg0.conf regenerated; previous version backed up to $WG0_CONF_BACKUP"
+  mv "$NEW_WG0_CONF" "$WG0_CONF"
+else
+  log "wg0.conf written (fresh install)"
+  mv "$NEW_WG0_CONF" "$WG0_CONF"
+fi
 
 # -----------------------------------------------------------------------------
 # 5. bring up wg0
@@ -316,6 +342,17 @@ resolve_xray_version() {
   printf '%s' "$_tag"
 }
 
+# Returns the currently-installed xray version, e.g. "1.8.20" (no
+# leading 'v'), or empty if xray is not installed or the binary
+# can't be queried. Output of `xray version` is something like
+# "Xray 26.3.27 (Xray, Penetrates Everything.) ...", so awk '{print $2}'.
+current_xray_version() {
+  local raw
+  raw=$("$XRAY_PREFIX/xray" version 2>/dev/null | head -1) || return 0
+  [ -z "$raw" ] && return 0
+  echo "$raw" | awk '{print $2}'
+}
+
 install_xray() {
   local _ver=$1
   local _zip="/tmp/xray-${_ver}.zip"
@@ -334,11 +371,42 @@ install_xray() {
   log "xray installed at $XRAY_PREFIX/xray → $XRAY_SYMLINK"
 }
 
-if [ -x "$XRAY_PREFIX/xray" ] || [ -x "$XRAY_SYMLINK" ]; then
-  log "xray already installed; skipping download (set WGSERVER_XRAY_VERSION=... to upgrade)"
-else
+# Install/upgrade decision:
+#   - xray missing                         → install (target = env or latest)
+#   - xray installed, WGSERVER_XRAY_VERSION set → that version is target, install if differs
+#   - xray installed, no WGSERVER_XRAY_VERSION → latest from GitHub is target
+#   - GitHub API fails AND xray installed → warn and keep current
+#   - GitHub API fails AND xray missing    → die
+current=$(current_xray_version)
+
+if [ -z "$current" ]; then
+  log "xray not installed, installing"
   command -v unzip >/dev/null || apt-get install -y -qq unzip
   install_xray "$(resolve_xray_version)"
+elif [ -n "$XRAY_VERSION" ]; then
+  target="${XRAY_VERSION#v}"
+  if [ "$current" = "$target" ]; then
+    log "xray already at requested version $current, skipping"
+  else
+    log "xray upgrade: $current → $target"
+    command -v unzip >/dev/null || apt-get install -y -qq unzip
+    install_xray "v$target"
+  fi
+else
+  latest_tag=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
+               | jq -r '.tag_name // empty') || latest_tag=""
+  if [ -z "$latest_tag" ]; then
+    warn "could not query GitHub for latest xray release; staying on current version $current"
+  else
+    target="${latest_tag#v}"
+    if [ "$current" = "$target" ]; then
+      log "xray already at latest version $current, skipping"
+    else
+      log "xray upgrade: $current → $target (latest from GitHub)"
+      command -v unzip >/dev/null || apt-get install -y -qq unzip
+      install_xray "v$target"
+    fi
+  fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -763,15 +831,35 @@ systemctl enable wgserver-iptables.service
 systemctl enable --now xray.service
 systemctl enable --now wgserver.service
 
-# Sanity: if xray didn't actually start (e.g. operator's config
-# references an unreachable VLESS server), the rest still boots
-# but no traffic flows. Surface that early so the operator
-# notices.
-sleep 1
-if ! systemctl is-active --quiet xray.service; then
-  warn "xray.service is not active. Check: journalctl -u xray -n 50"
-  warn "    /etc/xray/config.json validates as JSON, but xray may be failing on a real outbound."
-fi
+# Restart the long-running services so the new binary (and any
+# updated unit-file settings) actually take effect. `enable --now`
+# is a no-op when the service is already running, so on upgrade
+# the old binary would stay loaded in memory without this.
+#
+# We deliberately do NOT restart wgserver-iptables.service: its
+# ExecStart does `iptables-restore` which would wipe any
+# operator-added iptables rules (e.g. the SSH-to-self exemption
+# documented in README) by overwriting the kernel state with the
+# saved file. The rules are already correct in the kernel from
+# section 8; the systemd unit is just for boot persistence.
+log "restarting wgserver and xray to load new binary"
+systemctl restart wgserver.service xray.service
+
+# Post-restart health check. Catches both:
+#   - systemctl restart itself returned non-zero
+#   - restart succeeded but the service immediately crashed
+#     (e.g. new binary segfaults on startup, bad DB migration,
+#     xray config rejected by newer xray version)
+# We fail loudly instead of leaving the host in a half-broken
+# state where the new binary is on disk but the old one is
+# still in memory.
+sleep 2
+for svc in wgserver xray; do
+  if ! systemctl is-active --quiet "$svc.service"; then
+    die "$svc.service is not active after restart. Check: journalctl -u $svc -n 50"
+  fi
+done
+log "post-restart health check passed (wgserver, xray both active)"
 
 # -----------------------------------------------------------------------------
 # 15. summary
