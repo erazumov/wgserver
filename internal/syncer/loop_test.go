@@ -34,6 +34,10 @@ func (f *fakeRunner) Output(name string, args ...string) (string, error) {
 	return "", nil
 }
 
+func (f *fakeRunner) OutputStdin(name string, args []string, _ io.Reader) (string, error) {
+	return "", nil
+}
+
 func (f *fakeRunner) callsCopy() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -67,6 +71,10 @@ func (c *countingRunner) Output(name string, args ...string) (string, error) {
 	return "", nil
 }
 
+func (c *countingRunner) OutputStdin(name string, args []string, _ io.Reader) (string, error) {
+	return "", nil
+}
+
 func (c *countingRunner) callsCopy() []string {
 	return c.fake.callsCopy()
 }
@@ -86,7 +94,7 @@ func newTestLoop(t *testing.T, db *sql.DB, r runner) *Loop {
 	return &Loop{
 		DB:        db,
 		Runner:    r,
-		Interface: "wg1",
+		Interface: "wg0",
 		PSKDir:    t.TempDir(),
 		Logger:    log.New(io.Discard, "", 0),
 		Interval:  time.Hour,
@@ -96,6 +104,7 @@ func newTestLoop(t *testing.T, db *sql.DB, r runner) *Loop {
 type runner interface {
 	Run(name string, args ...string) error
 	Output(name string, args ...string) (string, error)
+	OutputStdin(name string, args []string, _ io.Reader) (string, error)
 }
 
 func seedPeer(t *testing.T, db *sql.DB, p store.Peer) int64 {
@@ -146,7 +155,7 @@ func TestRunOnce_AddsNewPeer(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("calls = %v, want 1", calls)
 	}
-	want := "wg set wg1 peer PUBKEY_A allowed-ips 10.0.1.2/32"
+	want := "wg set wg0 peer PUBKEY_A allowed-ips 10.0.1.2/32"
 	if calls[0] != want {
 		t.Errorf("call = %q, want %q", calls[0], want)
 	}
@@ -174,7 +183,7 @@ func TestRunOnce_RemovesDisabledPeer(t *testing.T) {
 	if err := l.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce 1 (add): %v", err)
 	}
-	if got := r.callsCopy(); len(got) != 1 || got[0] != "wg set wg1 peer PUBKEY_A allowed-ips 10.0.1.2/32" {
+	if got := r.callsCopy(); len(got) != 1 || got[0] != "wg set wg0 peer PUBKEY_A allowed-ips 10.0.1.2/32" {
 		t.Fatalf("first call = %v, want add", got)
 	}
 
@@ -191,7 +200,7 @@ func TestRunOnce_RemovesDisabledPeer(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("calls = %v, want 2", calls)
 	}
-	if calls[1] != "wg set wg1 peer PUBKEY_A remove" {
+	if calls[1] != "wg set wg0 peer PUBKEY_A remove" {
 		t.Errorf("second call = %q, want remove", calls[1])
 	}
 	pending, _ := peerState(t, db, id)
@@ -223,7 +232,7 @@ func TestRunOnce_PreservesPresharedKey(t *testing.T) {
 	// accepts a file path, so the syncer must have written the PSK to
 	// a file and passed that path. Verify the arg shape and that the
 	// file exists with the PSK content.
-	const wantPrefix = "wg set wg1 peer PUBKEY_A allowed-ips 10.0.1.2/32 preshared-key "
+	const wantPrefix = "wg set wg0 peer PUBKEY_A allowed-ips 10.0.1.2/32 preshared-key "
 	if !strings.HasPrefix(calls[0], wantPrefix) {
 		t.Errorf("call = %q, want prefix %q", calls[0], wantPrefix)
 	}
@@ -280,8 +289,8 @@ func TestRunOnce_ContinuesOnError(t *testing.T) {
 	if calls := r.callsCopy(); len(calls) != 1 {
 		t.Errorf("recorded successful calls = %d, want 1 (only B)", len(calls))
 	}
-	if calls := r.callsCopy(); len(calls) > 0 && calls[0] != "wg set wg1 peer PUBKEY_B allowed-ips 10.0.1.3/32" {
-		t.Errorf("success call = %q, want wg set wg1 peer PUBKEY_B ...", calls[0])
+	if calls := r.callsCopy(); len(calls) > 0 && calls[0] != "wg set wg0 peer PUBKEY_B allowed-ips 10.0.1.3/32" {
+		t.Errorf("success call = %q, want wg set wg0 peer PUBKEY_B ...", calls[0])
 	}
 	pendingA, _ := peerState(t, db, idA)
 	pendingB, _ := peerState(t, db, idB)

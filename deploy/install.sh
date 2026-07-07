@@ -1,22 +1,39 @@
 #!/usr/bin/env bash
 # install.sh — end-to-end installer for wgserver.
 #
-# Brings up a Debian 12 host as a WireGuard gateway with:
-#   * wg0  — outbound WireGuard peer (the "exit WG", given by the user)
-#   * wg1  — clients peer here, traffic forwarded to wg0 (MASQUERADE)
-#   * wgserver  — admin UI + sync-loop, talking to wg1 via `wg set`
+# Brings up a Debian 12 host as a WireGuard gateway whose client
+# traffic is transparently proxied through a local xray-core
+# (VLESS Reality) client:
 #
-# Idempotent: re-running on a working host regenerates only the binary
-# and the systemd unit. Server keys (wg0, wg1) are written once and
-# preserved — overwriting them would invalidate every client .conf.
+#   * wg0       — single WireGuard interface, clients peer here
+#                 (no [Peer] sections in wg0.conf; peers are applied
+#                 by the syncer via `wg set wg0 peer ...`)
+#   * xray      — dokodemo-door inbound on 127.0.0.1:10808
+#                 VLESS Reality outbound to the remote
+#   * iptables  — REDIRECT wg0 PREROUTING (tcp/udp) + wgserver uid
+#                 OUTPUT (tcp/udp) → 127.0.0.1:10808
+#   * wgserver  — admin UI + sync-loop, runs as the wgserver system
+#                 user. iptables OUTPUT rule catches its outbound
+#                 (Telegram long-poll, future GitHub polls) and
+#                 tunnels it through xray.
+#
+# Idempotent: re-running on a working host regenerates xray, the
+# iptables rules, the systemd units and the binary, but preserves
+# /etc/wireguard/wg0.conf (existing client .confs stay valid),
+# /etc/wgserver/wgserver.yaml and /etc/xray/config.json
+# (operator-managed — wgserver does not touch VLESS secrets).
 #
 # Usage:
-#   WGSERVER_EXIT_WG_ENDPOINT=host:51820 \
-#   WGSERVER_EXIT_WG_PUBKEY=base64... \
 #   ./install.sh /path/to/wgserver-linux-amd64
 #
-# Optional env vars: WGSERVER_LISTEN_ADDR, WGSERVER_TG_BOT_TOKEN,
-#                    WGSERVER_TG_CHAT_ID, WGSERVER_TG_QUOTA.
+# Required on first install: /etc/xray/config.json (operator-managed,
+# must have a dokodemo-door inbound on 127.0.0.1:10808; install.sh
+# validates and aborts with a clear error otherwise). See
+# AGENTS.md invariant "xray config is operator-managed".
+#
+# Optional env vars: WGSERVER_LISTEN_ADDR, WGSERVER_HEALTH_ADDR,
+#                    WGSERVER_TG_BOT_TOKEN, WGSERVER_TG_CHAT_ID,
+#                    WGSERVER_TG_QUOTA, WGSERVER_XRAY_VERSION.
 # Anything not in the environment is prompted for (if stdin is a TTY).
 
 set -euo pipefail
@@ -26,15 +43,28 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 ETC_WG=/etc/wireguard
 ETC_WGSERVER=/etc/wgserver
+ETC_XRAY=/etc/xray
 VAR_WGSERVER=/var/lib/wgserver
+XRAY_PREFIX=/usr/local/xray
 BIN_PATH=/usr/local/bin/wgserver
+XRAY_SYMLINK=/usr/local/bin/xray
+WG_SYSTEMD_UNIT=/etc/systemd/system/wg-quick@wg0.service.d
 SYSTEMD_UNIT=/etc/systemd/system/wgserver.service
+XRAY_UNIT=/etc/systemd/system/xray.service
+IPTABLES_UNIT=/etc/systemd/system/wgserver-iptables.service
+IPTABLES_RULES=/etc/wgserver/iptables.rules
 ENV_FILE="${ETC_WGSERVER}/wgserver.env"
 CONF_FILE="${ETC_WGSERVER}/wgserver.yaml"
 SYSCTL_FILE=/etc/sysctl.d/99-wgserver.conf
-
 WG0_CONF="${ETC_WG}/wg0.conf"
-WG1_CONF="${ETC_WG}/wg1.conf"
+XRAY_CONF="${ETC_XRAY}/config.json"
+XRAY_INBOUND_PORT=10808
+# TPROXY requires a fwmark to be set on intercepted UDP packets,
+# then an ip rule that sends packets with that mark to a local-route
+# table. The wg0 PostUp uses these values; they MUST be defined
+# before wg0.conf is written in section 4.
+TPROXY_MARK=0x1
+TPROXY_TABLE=100
 
 # -----------------------------------------------------------------------------
 # helpers
@@ -50,7 +80,6 @@ require_root() {
 is_tty() { [ -t 0 ] && [ -t 1 ]; }
 
 prompt() {
-  # prompt VAR_NAME "label" [default]
   local _var=$1 _label=$2 _default=${3:-}
   local _current="${!_var:-}"
   local _value
@@ -82,14 +111,21 @@ require_root
 
 LISTEN_ADDR=${WGSERVER_LISTEN_ADDR:-127.0.0.1:8080}
 HEALTH_ADDR=${WGSERVER_HEALTH_ADDR:-127.0.0.1:9090}
-EXIT_WG_ENDPOINT=${WGSERVER_EXIT_WG_ENDPOINT:-}
-EXIT_WG_PUBKEY=${WGSERVER_EXIT_WG_PUBKEY:-}
 TG_BOT_TOKEN=${WGSERVER_TG_BOT_TOKEN:-}
 TG_CHAT_ID=${WGSERVER_TG_CHAT_ID:-0}
 TG_QUOTA=${WGSERVER_TG_QUOTA:-2}
+XRAY_VERSION=${WGSERVER_XRAY_VERSION:-}
 
-prompt EXIT_WG_ENDPOINT "exit_wg endpoint (host:port)" ""
-prompt EXIT_WG_PUBKEY   "exit_wg pubkey (base64)"        ""
+# WGSERVER_PUBLIC_ENDPOINT is what every client .conf will get
+# written into the [Peer] Endpoint = ... line. The default
+# $(hostname) is almost always wrong: on most hosts $(hostname)
+# returns the short local name (e.g. "taigaproxy", "vpn1") that
+# does not resolve from the public internet. The operator MUST
+# either set this env var to a publicly-resolvable FQDN or to the
+# host's public IP literal. We do not try to autodetect the
+# public IP — it's network-specific and a wrong guess silently
+# ships a useless .conf to every Telegram user.
+WGSERVER_PUBLIC_ENDPOINT=${WGSERVER_PUBLIC_ENDPOINT:-}
 
 if [ -z "${1:-}" ] && [ -z "${WGSERVER_BINARY:-}" ]; then
   die "pass the wgserver binary as \$1 or set WGSERVER_BINARY"
@@ -97,20 +133,41 @@ fi
 WG_BINARY=${1:-${WGSERVER_BINARY}}
 [ -f "$WG_BINARY" ] || die "binary not found: $WG_BINARY"
 
+# Resolve the [Peer] Endpoint value used in every client .conf.
+# Public IP / FQDN that the *client* dials — not the listen addr
+# (which is set by wg-quick on the wireguard interface directly).
+if [ -z "$WGSERVER_PUBLIC_ENDPOINT" ]; then
+  # No env var set. Default to $(hostname) but warn loudly: the
+  # short hostname is almost never a valid public endpoint. The
+  # operator should set WGSERVER_PUBLIC_ENDPOINT on next run.
+  DEFAULT_ENDPOINT="$(hostname):51820"
+  warn "WGSERVER_PUBLIC_ENDPOINT not set; falling back to \"$DEFAULT_ENDPOINT\"."
+  warn "    If \"$(hostname)\" is a short local name (not a public FQDN or IP),"
+  warn "    every .conf handed out by the Telegram bot will be useless."
+  warn "    Fix: re-run with WGSERVER_PUBLIC_ENDPOINT=<public-ip-or-fqdn>:51820"
+  WGSERVER_PUBLIC_ENDPOINT="$DEFAULT_ENDPOINT"
+fi
+
 # -----------------------------------------------------------------------------
 # 1. apt deps
 # -----------------------------------------------------------------------------
-log "installing apt deps (wireguard-tools, iptables, curl)"
-# curl is required by deploy.sh's /healthz check (a fresh Debian
-# minimal install does not include it; without it, deploy.sh fails
-# with a misleading "healthz never came up" even though wgserver is
-# healthy).
+log "installing apt deps (wireguard-tools, iptables, curl, ca-certificates, xz-utils, jq)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq wireguard-tools iptables curl
+# curl: deploy.sh's /healthz check + xray download.
+# ca-certificates: TLS to github.com / api.github.com.
+# xz-utils: xray releases are distributed as .zip that contains a xz-compressed geoip.dat.
+# jq: validation of /etc/xray/config.json (the operator's VLESS Reality profile).
+# iptables: REDIRECT rules for transparent proxying.
+# wireguard-tools: wg + wg-quick (kernel module handles the WG data plane).
+apt-get install -y -qq wireguard-tools iptables curl ca-certificates xz-utils jq
 
-command -v wg >/dev/null      || die "wg not in PATH after install"
-command -v wg-quick >/dev/null || die "wg-quick not in PATH after install"
+command -v wg >/dev/null         || die "wg not in PATH after install"
+command -v wg-quick >/dev/null   || die "wg-quick not in PATH after install"
+command -v iptables >/dev/null   || die "iptables not in PATH after install"
+command -v jq >/dev/null         || die "jq not in PATH after install"
+command -v curl >/dev/null       || die "curl not in PATH after install"
+command -v xz >/dev/null         || die "xz not in PATH after install"
 
 # -----------------------------------------------------------------------------
 # 2. ip_forward
@@ -124,17 +181,20 @@ EOF
 sysctl --system >/dev/null
 
 # -----------------------------------------------------------------------------
-# 2.5 wgserver system user
+# 3. system users
 #
-# Running the daemon as a dedicated system user lets us policy-route
-# its outbound traffic (Telegram bot → api.telegram.org, future
-# GitHub polls for the updater, etc.) through the exit WG via a
-# `uidrange` ip rule. SSH/ping/apt on the host itself keep using the
-# public NIC because they run as root or other system uids that don't
-# match the uidrange rule.
-#
-# Created BEFORE any chown or wg0.conf heredoc reference; the uid is
-# baked into the PostUp rule below.
+# Two users, two reasons:
+#   wgserver — runs the admin UI + syncer. iptables OUTPUT rule
+#              matches its uid to REDIRECT its outbound (Telegram,
+#              future GitHub API) into xray. MUST stay a separate
+#              system user; running it as root would defeat that
+#              rule. See AGENTS.md invariant.
+#   xray     — runs the xray-core process. MUST NOT be the wgserver
+#              uid, otherwise xray's own outbound VLESS connection
+#              would match the OUTPUT rule → infinite loop
+#              ("xray is up but every connection times out"). Root
+#              is also fine; xray user is preferred for least
+#              privilege.
 # -----------------------------------------------------------------------------
 if ! id -u wgserver >/dev/null 2>&1; then
   log "creating wgserver system user"
@@ -143,14 +203,29 @@ fi
 WGSERVER_UID=$(id -u wgserver)
 log "wgserver uid = ${WGSERVER_UID}"
 
+if ! id -u xray >/dev/null 2>&1; then
+  log "creating xray system user"
+  useradd --system --no-create-home --shell /usr/sbin/nologin --user-group xray
+fi
+XRAY_UID=$(id -u xray)
+log "xray uid = ${XRAY_UID}"
+
+if [ "$WGSERVER_UID" = "$XRAY_UID" ]; then
+  die "wgserver and xray must have distinct uids (both = $WGSERVER_UID). refuse to install."
+fi
+
 # -----------------------------------------------------------------------------
-# 3. server keys (idempotent)
+# 4. wg0 keypair + wg0.conf
+#
+# wg0 is the SINGLE WireGuard interface. wg0.conf contains zero
+# [Peer] sections — per-client peers are added by the syncer via
+# `wg set wg0 peer <pubkey> allowed-ips <ip>`. The wg0 server pubkey
+# here is what we hand out in every client .conf.
 # -----------------------------------------------------------------------------
 mkdir -p "$ETC_WG"
 chmod 0700 "$ETC_WG"
 
 write_keypair() {
-  # write_keypair OUT_PRIV
   local _out=$1
   local _priv _pub
   _priv=$(wg genkey)
@@ -160,7 +235,6 @@ write_keypair() {
   printf '%s' "$_pub"
 }
 
-# wg0 — outbound to exit_wg server
 if [ -f "$WG0_CONF" ]; then
   log "wg0.conf already exists; preserving server keys"
   WG0_PRIV=$(awk '/^PrivateKey/ {print $3; exit}' "$WG0_CONF")
@@ -171,224 +245,305 @@ else
   WG0_PRIV=$(cat /etc/wireguard/wg0.key)
 fi
 
-# wg1 — clients peer here
-if [ -f "$WG1_CONF" ]; then
-  log "wg1.conf already exists; preserving server keys"
-  WG1_PRIV=$(awk '/^PrivateKey/ {print $3; exit}' "$WG1_CONF")
-  WG1_PUB=$(printf '%s' "$WG1_PRIV" | wg pubkey)
-else
-  log "generating wg1 server keypair"
-  WG1_PUB=$(write_keypair /etc/wireguard/wg1.key)
-  WG1_PRIV=$(cat /etc/wireguard/wg1.key)
-fi
-
-# -----------------------------------------------------------------------------
-# 4. wg0.conf — outbound to exit_wg
-#
-# Routing model: this server is a transparent gateway, not a WireGuard
-# client. The host's own traffic (SSH, ping, apt, /healthz polling)
-# MUST keep using the system's main routing table and the public NIC.
-# Only forwarded client traffic (from the wg1 subnet) AND the
-# wgserver daemon's own traffic (e.g. Telegram long-poll to
-# api.telegram.org) is sent via wg0 to the exit_wg.
-#
-# Implementation:
-#   * AllowedIPs = 0.0.0.0/0 — kept wide so the wg crypto table
-#     accepts MASQUERADEd return packets (src = any internet IP,
-#     dst = this host's wg0 IP). This is a kernel-level acceptance
-#     rule, not a route.
-#   * Table = off — tells wg-quick to NOT install AllowedIPs as
-#     kernel routes. Without this, AllowedIPs=0.0.0.0/0 would
-#     replace the host's default route with `default dev wg0`,
-#     silently breaking SSH/ping/apt (the kernel would route every
-#     response out via the tunnel, with the wrong source IP).
-#   * PostUp / PreDown — install/remove a dedicated routing table
-#     (51820) holding `default dev wg0`, plus two ip rules:
-#       (1) source-based — traffic from the wg1 subnet (forwarded
-#           client traffic), priority 100.
-#       (2) uidrange — traffic from the wgserver uid (the daemon's
-#           own outbound, e.g. Telegram API calls), priority 50
-#           (checked before the source-based rule, so it wins
-#           regardless of source IP).
-#     Everything else (root, system uids, plain user shells = SSH/
-#     ping/apt) keeps falling through to the main table and the
-#     public default route.
-#
-# The conf is rewritten on every install.sh run, but the private key
-# is read from the existing conf first (and /etc/wireguard/wg0.key
-# on first install) so client .confs stay valid.
-# -----------------------------------------------------------------------------
-WG_ROUTING_TABLE=51820
-CLIENTS_SUBNET=10.0.1.0/24   # MUST match Address = 10.0.1.1/24 in wg1.conf below
-WGSERVER_UIDRULE_PRIO=50
-CLIENTS_SUBNET_RULE_PRIO=100
-
-# Read existing private key (or generate a new one on first install)
-if [ -f "$WG0_CONF" ]; then
-  log "refreshing $WG0_CONF (preserving server keys)"
-  WG0_PRIV=$(awk '/^PrivateKey/ {print $3; exit}' "$WG0_CONF")
-  WG0_PUB=$(printf '%s' "$WG0_PRIV" | wg pubkey)
-else
-  log "generating wg0 server keypair"
-  WG0_PUB=$(write_keypair /etc/wireguard/wg0.key)
-  WG0_PRIV=$(cat /etc/wireguard/wg0.key)
-fi
+CLIENTS_SUBNET=10.0.1.0/24   # MUST match Address = 10.0.1.1/24 below
+CLIENTS_ADDR=10.0.1.1/24
 
 cat > "$WG0_CONF" <<EOF
 # managed by wgserver install.sh
-# Do NOT add per-client peers here — they belong on wg1.
-# See the install.sh comment block above for the routing model.
+# SINGLE WireGuard interface. Per-client peers are NOT listed here
+# — the wgserver sync-loop calls 'wg set wg0 peer <pubkey>
+# allowed-ips <ip>' after each admin action. See AGENTS.md
+# invariant: "One WireGuard interface, ever."
 #
-# Table, PostUp and PreDown are wg-quick extensions and MUST live in
-# [Interface]. wg-quick only strips wg-quick-specific keys from
-# [Interface]; if you put them in [Peer] they are passed verbatim to
-# wg setconf, which does not understand them and fails with
-# "Line unrecognized: 'Table=off'".
+# All client traffic is transparently proxied through the local
+# xray-core (VLESS Reality) via the PREROUTING REDIRECT rule in
+# PostUp. There is no MASQUERADE, no policy routing and no second
+# WG interface.
 [Interface]
 PrivateKey = ${WG0_PRIV}
 ListenPort = 51820
-Address = 10.0.0.1/24
-Table = off
-# NB: we use "del ... || true; add ..." rather than "replace" because
-# iproute2 <6.4 (Debian 12 ships 6.1.0) does not implement
-# "ip rule replace". Same end-state, works on every iproute2.
-PostUp = ip -4 route replace default dev %i table ${WG_ROUTING_TABLE}; ip -4 rule del from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO} 2>/dev/null || true; ip -4 rule add from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO}; ip -4 rule del uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO} 2>/dev/null || true; ip -4 rule add uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO}
-PreDown = ip -4 rule del uidrange ${WGSERVER_UID}-${WGSERVER_UID} table ${WG_ROUTING_TABLE} priority ${WGSERVER_UIDRULE_PRIO} || true; ip -4 rule del from ${CLIENTS_SUBNET} table ${WG_ROUTING_TABLE} priority ${CLIENTS_SUBNET_RULE_PRIO} || true; ip -4 route del default dev %i table ${WG_ROUTING_TABLE} || true
+Address = ${CLIENTS_ADDR}
 
-[Peer]
-# exit_wg (upstream WireGuard). Forwarded client traffic and the
-# wgserver daemon's own traffic are routed through it via table
-# ${WG_ROUTING_TABLE} (see [Interface] PostUp above). The host's
-# own traffic (SSH, ping, apt) is NOT affected.
-PublicKey = ${EXIT_WG_PUBKEY}
-Endpoint = ${EXIT_WG_ENDPOINT}
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
+PostUp =  iptables -t nat -C PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT} 2>/dev/null || iptables -t nat -A PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT}; iptables -t mangle -C PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} 2>/dev/null || iptables -t mangle -A PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT}
+PreDown = iptables -t nat -D PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT} 2>/dev/null || true; iptables -t mangle -D PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} 2>/dev/null || true
 EOF
 chmod 0600 "$WG0_CONF"
 
 # -----------------------------------------------------------------------------
-# 5. wg1.conf — clients peer here. NO [Peer] sections; per-client peers
-#    are added by the syncer via `wg set wg1 peer ...`.
+# 5. bring up wg0
+#
+# wg-quick@wg0 PostUp installs the PREROUTING REDIRECT. Safe to
+# enable unconditionally — bringing up an empty [Interface] only
+# adds a local interface; the default route is not touched.
+#
+# The `restart` (not just `enable --now`) is required on upgrade:
+# enable --now is a no-op when the service is already running, so
+# the OLD PostUp (with the old exit_wg PBR rules) would stay loaded
+# in the kernel. restart brings wg0 down and back up with the new
+# conf. Warning: drops all active client connections for ~1s.
 # -----------------------------------------------------------------------------
-if [ ! -f "$WG1_CONF" ]; then
-  log "writing $WG1_CONF"
-  cat > "$WG1_CONF" <<EOF
-# managed by wgserver install.sh
-# Per-client peers are NOT listed here. The wgserver sync-loop calls
-# 'wg set wg1 peer <pubkey> allowed-ips <ip>' after each admin action.
-# See AGENTS.md invariant: "Single upstream WG peer."
-[Interface]
-PrivateKey = ${WG1_PRIV}
-ListenPort = 51821
-Address = 10.0.1.1/24
-
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o wg0 -j MASQUERADE
-PreDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o wg0 -j MASQUERADE
-EOF
-  chmod 0600 "$WG1_CONF"
+log "enabling wg-quick@wg0"
+systemctl enable --now wg-quick@wg0.service
+if systemctl is-active --quiet wg-quick@wg0.service; then
+  log "restarting wg-quick@wg0 to apply new PostUp"
+  systemctl restart wg-quick@wg0.service
 fi
 
 # -----------------------------------------------------------------------------
-# 6. bring up interfaces
+# 6. install xray-core
 #
-# With the PBR setup above, bringing up wg-quick@wg0 no longer affects
-# the host's own traffic — SSH/ping/apt keep using the main routing
-# table. The handshake check below is therefore a "client experience"
-# check, not a "server reachability" check: if the exit-WG is down,
-# only forwarded client traffic is affected. We still tear wg0 down in
-# that case so the operator notices and the syncer doesn't try to push
-# peers that won't work.
-#
-#   1. Pre-flight: TCP-connect to the exit-WG endpoint. Skip wg0 if
-#      unreachable — operator fixes the endpoint, then enables wg0.
-#   2. After wg-quick@wg0, wait up to 10s for a WireGuard handshake.
-#      If none, `wg-quick down wg0` (PreDown cleans up the routing
-#      table and rule).
+# Downloaded from the official XTLS/Xray-core GitHub release
+# (`Xray-linux-64.zip`). Pinned by WGSERVER_XRAY_VERSION (default:
+# latest). The .zip is unpacked into /usr/local/xray/ and symlinked
+# into /usr/local/bin/xray.
 # -----------------------------------------------------------------------------
-log "enabling wg-quick@wg0 + wg-quick@wg1"
-ep_host=${EXIT_WG_ENDPOINT%%:*}
-ep_port=${EXIT_WG_ENDPOINT##*:}
-SKIP_WG0=0
-if ! timeout 5 bash -c "exec 3<>/dev/tcp/$ep_host/$ep_port" 2>/dev/null; then
-  warn "exit_wg endpoint $EXIT_WG_ENDPOINT is unreachable (TCP connect failed)"
-  warn "skipping wg-quick@wg0 — fix the endpoint, then run manually:"
-  warn "    systemctl enable --now wg-quick@wg0"
-  SKIP_WG0=1
-fi
-
-if [ "$SKIP_WG0" = "0" ]; then
-  if ! systemctl enable --now wg-quick@wg0.service; then
-    warn "wg-quick@wg0 failed to start; rolling on without it"
-    SKIP_WG0=1
-  else
-    # wg-quick@wg0 may have already been up from a previous install;
-    # `enable --now` does NOT restart it, so the freshly-written
-    # PostUp/PreDown (e.g. the new uidrange rule) is not applied.
-    # Force a restart to apply the new routing rules.
-    systemctl restart wg-quick@wg0.service || {
-      warn "wg-quick@wg0 restart failed; rolling on without it"
-      SKIP_WG0=1
-    }
-    # Wait for handshake. `wg show <iface>` prints a "latest handshake:"
-    # line once any peer has completed one; absent that, the tunnel
-    # is half-up and only forwarded client traffic is broken (the
-    # host's own traffic is unaffected by the PBR setup, but we still
-    # tear wg0 down so the operator notices).
-    hs_ok=0
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      if wg show wg0 2>/dev/null | grep -q "latest handshake"; then
-        hs_ok=1
-        break
-      fi
-      sleep 1
-    done
-    if [ "$hs_ok" = "0" ]; then
-      warn "wg0 handshake did not establish within 10s — rolling back to keep server reachable"
-      wg-quick down wg0 || true
-      warn "fix the exit_wg endpoint, then bring wg0 up manually:"
-      warn "    systemctl enable --now wg-quick@wg0"
-      SKIP_WG0=1
-    else
-      log "wg0 handshake established"
-    fi
+resolve_xray_version() {
+  if [ -n "$XRAY_VERSION" ]; then
+    printf '%s' "$XRAY_VERSION"
+    return
   fi
+  local _tag
+  _tag=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
+         | jq -r '.tag_name // empty')
+  [ -n "$_tag" ] || die "could not resolve latest xray release tag (set WGSERVER_XRAY_VERSION)"
+  printf '%s' "$_tag"
+}
+
+install_xray() {
+  local _ver=$1
+  local _zip="/tmp/xray-${_ver}.zip"
+  log "downloading xray ${_ver}"
+  curl -fsSL -o "$_zip" \
+    "https://github.com/XTLS/Xray-core/releases/download/${_ver}/Xray-linux-64.zip" \
+    || die "xray download failed (check network / WGSERVER_XRAY_VERSION=${_ver})"
+
+  mkdir -p "$XRAY_PREFIX"
+  unzip -oq "$_zip" -d "$XRAY_PREFIX" \
+    || die "xray zip extraction failed (maybe unzip is missing — apt install unzip)"
+
+  chmod 0755 "$XRAY_PREFIX/xray"
+  ln -sf "$XRAY_PREFIX/xray" "$XRAY_SYMLINK"
+  rm -f "$_zip"
+  log "xray installed at $XRAY_PREFIX/xray → $XRAY_SYMLINK"
+}
+
+if [ -x "$XRAY_PREFIX/xray" ] || [ -x "$XRAY_SYMLINK" ]; then
+  log "xray already installed; skipping download (set WGSERVER_XRAY_VERSION=... to upgrade)"
+else
+  command -v unzip >/dev/null || apt-get install -y -qq unzip
+  install_xray "$(resolve_xray_version)"
 fi
 
-# wg1 is local-only (no [Peer] sections). Bringing it up only adds a
-# local interface and FORWARD+MASQUERADE rules; it does NOT change the
-# default route. Safe to enable unconditionally.
-systemctl enable --now wg-quick@wg1.service
+# -----------------------------------------------------------------------------
+# 7. xray config
+#
+# /etc/xray/config.json is operator-managed. wgserver does NOT
+# rewrite the operator's VLESS Reality secrets — see AGENTS.md
+# invariant "xray config is operator-managed". The only thing
+# install.sh does is validate that the file exists, parses as
+# JSON, and the first inbound is dokodemo-door on
+# 127.0.0.1:10808 (the port the iptables REDIRECT sends to).
+# -----------------------------------------------------------------------------
+if [ ! -f "$XRAY_CONF" ]; then
+  die "/etc/xray/config.json not found. The operator must write it BEFORE running install.sh. Minimal example:
+    {
+      \"log\": { \"loglevel\": \"warning\" },
+      \"inbounds\": [{
+        \"listen\": \"127.0.0.1\", \"port\": ${XRAY_INBOUND_PORT},
+        \"protocol\": \"dokodemo-door\",
+        \"settings\": { \"network\": \"tcp,udp\", \"followRedirect\": true },
+        \"tag\": \"transparent\"
+      }],
+      \"outbounds\": [{
+        \"protocol\": \"vless\",
+        \"settings\": {
+          \"vnext\": [{
+            \"address\": \"<VLESS_SERVER_HOST>\", \"port\": 443,
+            \"users\": [{ \"id\": \"<UUID>\", \"encryption\": \"none\", \"flow\": \"xtls-rprx-vision\" }]
+          }]
+        },
+        \"streamSettings\": {
+          \"network\": \"tcp\", \"security\": \"reality\",
+          \"realitySettings\": {
+            \"serverName\": \"<SNI>\", \"fingerprint\": \"chrome\",
+            \"shortId\": \"\", \"publicKey\": \"\"
+          }
+        }
+      }]
+    }"
+fi
+
+if ! jq -e . "$XRAY_CONF" >/dev/null 2>&1; then
+  die "$XRAY_CONF is not valid JSON"
+fi
+
+# Validate first inbound. The transparent-proxy REDIRECT only works
+# with dokodemo-door; socks/mixed/http require a protocol handshake
+# that the REDIRECTed packet never sends.
+FIRST_INBOUND_PROTO=$(jq -r '.inbounds[0].protocol // ""' "$XRAY_CONF")
+FIRST_INBOUND_LISTEN=$(jq -r '.inbounds[0].listen // ""' "$XRAY_CONF")
+FIRST_INBOUND_PORT=$(jq -r '.inbounds[0].port // ""' "$XRAY_CONF")
+
+[ "$FIRST_INBOUND_PROTO" = "dokodemo-door" ] \
+  || die "first inbound protocol must be \"dokodemo-door\" (got \"$FIRST_INBOUND_PROTO\"). SOCKS / mixed / http do not work with iptables REDIRECT."
+
+[ "$FIRST_INBOUND_LISTEN" = "127.0.0.1" ] \
+  || die "first inbound listen must be \"127.0.0.1\" (got \"$FIRST_INBOUND_LISTEN\")."
+
+[ "$FIRST_INBOUND_PORT" = "$XRAY_INBOUND_PORT" ] \
+  || die "first inbound port must be ${XRAY_INBOUND_PORT} (got \"$FIRST_INBOUND_PORT\")."
+
+FIRST_INBOUND_FOLLOW=$(jq -r '.inbounds[0].settings.followRedirect // false' "$XRAY_CONF")
+[ "$FIRST_INBOUND_FOLLOW" = "true" ] \
+  || die "first inbound settings.followRedirect must be true (so xray reads SO_ORIGINAL_DST)."
+
+FIRST_INBOUND_NET=$(jq -r '.inbounds[0].settings.network // ""' "$XRAY_CONF")
+[ "$FIRST_INBOUND_NET" = "tcp,udp" ] \
+  || warn "first inbound settings.network is \"${FIRST_INBOUND_NET}\" (recommended \"tcp,udp\" to cover both client traffic types)"
+
+log "xray config validated: dokodemo-door on 127.0.0.1:${XRAY_INBOUND_PORT}"
+
+# Verify that every VLESS outbound's vnext address is resolvable
+# from the host. If not, xray will sit silently retrying
+# net.LookupHost and the daemon's first curl will getaddrinfo-timeout
+# (and the operator will spend 2 hours debugging "DNS hangs").
+# Warn, don't die: the operator might intentionally have a
+# split-horizon DNS where the name resolves only via the tunnel
+# (rare for a VLESS client config), or might be running install.sh
+# from a network different from the deployed host.
+VLESS_ADDRS=$(jq -r '.outbounds[]? | select(.protocol=="vless") | .settings.vnext[]?.address' "$XRAY_CONF" 2>/dev/null)
+if [ -n "$VLESS_ADDRS" ]; then
+  while IFS= read -r _addr; do
+    [ -z "$_addr" ] && continue
+    # Skip if it's already a literal IP — no resolution needed.
+    if echo "$_addr" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+      :
+    elif command -v getent >/dev/null && getent hosts "$_addr" >/dev/null 2>&1; then
+      :
+    else
+      warn "VLESS address \"${_addr}\" does not resolve from this host. xray will fail to dial it."
+      warn "    Fix: replace with a literal IP in $XRAY_CONF (e.g. .outbounds[0].settings.vnext[0].address = \"1.2.3.4\")"
+    fi
+  done <<< "$VLESS_ADDRS"
+fi
+
+# Lock down perms so the xray user (not root) can read the config
+# but other users cannot. Always re-applied on every install run,
+# because editing the file with `cat >`, `tee`, or a default-umask
+# `nano` save will reset ownership to root:root 0644 — and the
+# systemd unit runs xray as the xray user, which then fails to
+# read the file. (Edit-in-place with `nano`/`vi`/`sed -i` keeps
+# mode and ownership.)
+chown root:xray "$XRAY_CONF"
+chmod 0640 "$XRAY_CONF"
 
 # -----------------------------------------------------------------------------
-# 7. wgserver dirs
+# 8. iptables / ip rules — transparent proxy into xray
+#
+# Two transports, one per protocol family, because they have
+# different kernel requirements:
+#
+#   TCP: iptables -t nat -j REDIRECT (nat table)
+#     — for TCP, getsockopt(SO_ORIGINAL_DST) returns the
+#       pre-NAT destination, so xray can read where the client
+#       wanted to go. Works out of the box, no special routing.
+#
+#   UDP: iptables -t mangle -j TPROXY (mangle table)
+#     — for UDP, REDIRECT only updates the post-NAT dst in
+#       conntrack (the kernel does NOT populate SO_ORIGINAL_DST
+#       the same way as for TCP), so xray sees dst=127.0.0.1:10808
+#       and tunnels to itself instead of the real target.
+#       TPROXY preserves the original dst in the socket the
+#       listener receives. Trade-off: TPROXY needs IP_TRANSPARENT
+#       on the listener (we have that via CAP_NET_ADMIN on the
+#       xray service) and a routing trick — a fwmark rule that
+#       redirects TPROXY-marked packets to a local-route table,
+#       otherwise the kernel routes them normally and they never
+#       reach the xray socket.
+#
+#   OUTPUT -m owner --uid-owner wgserver: must persist across
+#     reboots regardless of wg0 state. Saved to
+#     /etc/wgserver/iptables.rules and loaded at boot by
+#     wgserver-iptables.service.
+#
+#   PREROUTING -i wg0: only meaningful when wg0 is up. Installed
+#     and removed by wg-quick@wg0 PostUp/PreDown (section 4).
 # -----------------------------------------------------------------------------
-mkdir -p "$ETC_WGSERVER" "$VAR_WGSERVER"
+
+install_output_rules() {
+  # TCP — nat REDIRECT (works, preserves dst for xray)
+  iptables -t nat -C OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p tcp -j REDIRECT --to-ports "$XRAY_INBOUND_PORT" 2>/dev/null \
+    || iptables -t nat -A OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p tcp -j REDIRECT --to-ports "$XRAY_INBOUND_PORT"
+  # UDP — mangle TPROXY (preserves dst; the only way to make
+  # dokodemo-door read the real destination for UDP packets).
+  iptables -t mangle -C OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p udp -j TPROXY --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" --on-port "$XRAY_INBOUND_PORT" 2>/dev/null \
+    || iptables -t mangle -A OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p udp -j TPROXY --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" --on-port "$XRAY_INBOUND_PORT" \
+    || warn "mangle OUTPUT TPROXY failed (likely kernel/nf_tables limitation; daemon UDP DNS will go direct via host NIC, TCP still proxied)"
+}
+
+install_tproxy_routes() {
+  # Idempotent: `|| true` so re-running on a host that already
+  # has the rule is a no-op rather than a failure.
+  ip -4 rule add fwmark "$TPROXY_MARK/$TPROXY_MARK" lookup "$TPROXY_TABLE" 2>/dev/null || true
+  ip -4 route add local 0.0.0.0/0 dev lo table "$TPROXY_TABLE" 2>/dev/null || true
+}
+
+log "installing OUTPUT transparent-proxy rules (uid=${WGSERVER_UID} → :${XRAY_INBOUND_PORT})"
+install_output_rules
+log "installing TPROXY routing rules (fwmark=${TPROXY_MARK} → table ${TPROXY_TABLE} → local)"
+install_tproxy_routes
+
+# Persist the running iptables ruleset (nat + mangle + filter)
+# across reboots via wgserver-iptables.service. iptables-save
+# captures the mangle table (TPROXY rules) along with nat and
+# filter, so the operator's other rules survive too. The ip
+# rules / routes for TPROXY are NOT in iptables-save — those
+# are loaded by a small helper script from the systemd unit
+# (see section 13).
+log "saving iptables ruleset → $IPTABLES_RULES"
+iptables-save -c > "$IPTABLES_RULES"
+chmod 0600 "$IPTABLES_RULES"
+log "saving iptables ruleset → $IPTABLES_RULES"
+iptables-save -c > "$IPTABLES_RULES"
+chmod 0600 "$IPTABLES_RULES"
+
+# -----------------------------------------------------------------------------
+# 9. wgserver dirs
+#
+# Per-directory perms (matters — xray runs as the xray user, not
+# root, so it must be able to traverse /etc/xray and read
+# /etc/xray/config.json):
+#
+#   /var/lib/wgserver/   0700  root→wgserver:wgserver
+#   /var/lib/wgserver/psk 0700 wgserver:wgserver   (per-peer PSK files)
+#   /etc/wgserver/       0750  root:wgserver       (wgserver reads its YAML)
+#   /etc/xray/           0750  root:xray           (xray needs to traverse
+#                                                  and read config.json;
+#                                                  no `x` bit = EACCES
+#                                                  on open(), which is the
+#                                                  classic "permission
+#                                                  denied" trap on dirs)
+#   /etc/xray/config.json 0640 root:xray          (xray reads; nobody else)
+# -----------------------------------------------------------------------------
+mkdir -p "$ETC_WGSERVER" "$VAR_WGSERVER" "$ETC_XRAY"
 chmod 0700 "$VAR_WGSERVER"
 chown -R wgserver:wgserver "$VAR_WGSERVER"
-# psk/ holds per-peer preshared-key files. The syncer writes a PSK
-# to psk/<safe-pubkey> and passes that path to `wg set`; wireguard-tools
-# 1.0.20210914 (Debian 12) only accepts a file path for preshared-key.
-# Must be chowned: mkdir happens after the chown -R above and would
-# otherwise leave it root:root.
 mkdir -p "$VAR_WGSERVER/psk"
 chown wgserver:wgserver "$VAR_WGSERVER/psk"
 chmod 0700 "$VAR_WGSERVER/psk"
-# /etc/wgserver stays root-owned (config is operator-edited), but
-# the wgserver daemon must be able to read it. chgrp + 0750 lets the
-# wgserver user traverse the directory; individual file perms
-# (set below) control read access.
 chown root:wgserver "$ETC_WGSERVER"
 chmod 0750 "$ETC_WGSERVER"
+chown root:xray "$ETC_XRAY"
+chmod 0750 "$ETC_XRAY"
 
 # -----------------------------------------------------------------------------
-# 8. binary
+# 10. binary
 # -----------------------------------------------------------------------------
 log "installing binary to $BIN_PATH"
 install -m 0755 "$WG_BINARY" "$BIN_PATH"
 
 # -----------------------------------------------------------------------------
-# 9. wgserver.env
+# 11. wgserver.env
 # -----------------------------------------------------------------------------
 if [ ! -f "$ENV_FILE" ]; then
   log "writing $ENV_FILE"
@@ -401,7 +556,7 @@ EOF
 fi
 
 # -----------------------------------------------------------------------------
-# 10. wgserver.yaml
+# 12. wgserver.yaml
 # -----------------------------------------------------------------------------
 if [ ! -f "$CONF_FILE" ]; then
   log "writing $CONF_FILE"
@@ -417,31 +572,28 @@ http:
 db:
   path: "${VAR_WGSERVER}/db.sqlite"
 
-# outbound WireGuard peer (the "exit WG"). All client traffic is routed
-# through it via wg0. Per-client peers must NOT be added to wg0 — they
-# belong on wg1 and are applied by the sync-loop.
-exit_wg:
+# The single WireGuard interface. Clients peer here; per-client
+# peers are applied by the syncer via 'wg set wg0 peer ...'.
+# wg0.conf MUST contain zero [Peer] sections. All client traffic
+# is transparently redirected to a local xray-core (VLESS Reality)
+# via iptables (PREROUTING -i wg0 + OUTPUT --uid-owner
+# wgserver → 127.0.0.1:10808). xray runs as the xray system user
+# and reads /etc/xray/config.json (operator-managed).
+clients:
   interface: "wg0"
   listen_port: 51820
-  address: "10.0.0.1/24"
-  peer:
-    endpoint: "${EXIT_WG_ENDPOINT}"
-    public_key: "${EXIT_WG_PUBKEY}"
-    allowed_ips: "0.0.0.0/0"
-    persistent_keepalive: 25
-
-# Per-client WireGuard interface. The server's public key here is what
-# the .conf handed to each client puts in the [Peer] section.
-clients:
-  interface: "wg1"
-  listen_port: 51821
   address: "10.0.1.1/24"
   cidr: "10.0.1.0/24"
   dns_servers:
     - "1.1.1.1"
     - "9.9.9.9"
-  endpoint: "$(hostname):51821"
-  public_key: "${WG1_PUB}"
+  # Endpoint goes into the [Peer] line of every client .conf the
+  # Telegram bot hands out. Resolved from WGSERVER_PUBLIC_ENDPOINT
+  # (with a loud warning if the operator didn't set it and we fell
+  # back to $(hostname), which is almost always wrong). See
+  # section "input" above.
+  endpoint: "${WGSERVER_PUBLIC_ENDPOINT}"
+  public_key: "${WG0_PUB}"
 
 telegram:
   bot_token: "${TG_BOT_TOKEN}"
@@ -453,35 +605,125 @@ update:
   github_repo: "erazumov/wgserver"
   check_interval_minutes: 60
 EOF
-  chmod 0600 "$CONF_FILE"
+  chmod 0640 "$CONF_FILE"
 else
   log "wgserver.yaml already exists; preserving user edits"
 fi
-# wgserver.service runs as the wgserver user (see section 11): the
-# daemon reads this file at startup. chown is idempotent.
 chown wgserver:wgserver "$CONF_FILE"
 
 # -----------------------------------------------------------------------------
-# 11. systemd unit
-#
-# Always rewritten (unlike wgserver.yaml, which we preserve). The
-# user / capabilities / runtime path may have changed in install.sh.
+# 13. systemd units
 # -----------------------------------------------------------------------------
-log "writing $SYSTEMD_UNIT"
-cat > "$SYSTEMD_UNIT" <<'EOF'
+log "writing /etc/wgserver/tproxy-routes.sh"
+cat > /etc/wgserver/tproxy-routes.sh <<'TPROXY_EOF'
+#!/bin/sh
+# Apply the ip rule + ip route that TPROXY needs to deliver
+# intercepted packets to the xray listener. iptables-save does NOT
+# capture these (they are ip-rule state, not netfilter state), so
+# they are loaded by this helper script from the systemd unit
+# instead of being part of /etc/wgserver/iptables.rules.
+#
+# Idempotent: the "|| true" makes re-runs on a host that already
+# has the rule a no-op rather than a failure.
+set -e
+ip -4 rule  add fwmark ${TPROXY_MARK}/${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null || true
+ip -4 route add local 0.0.0.0/0 dev lo table ${TPROXY_TABLE}      2>/dev/null || true
+TPROXY_EOF
+chmod 0755 /etc/wgserver/tproxy-routes.sh
+
+log "writing $IPTABLES_UNIT"
+cat > "$IPTABLES_UNIT" <<'UNIT_EOF'
 [Unit]
-Description=wgserver: self-hosted WireGuard gateway
+Description=wgserver: load persistent iptables rules + TPROXY routing
 Documentation=https://github.com/erazumov/wgserver
-After=network-online.target wg-quick@wg0.service wg-quick@wg1.service
-Wants=network-online.target wg-quick@wg0.service
-Requires=wg-quick@wg1.service
+# Must run before wgserver and before wg-quick@wg0 (the latter
+# installs the PREROUTING REDIRECT / TPROXY in its PostUp; the
+# OUTPUT rules in $IPTABLES_RULES are independent but loading
+# them early keeps things consistent).
+Before=wgserver.service wg-quick@wg0.service
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Two startup steps. systemd runs multiple ExecStart= lines in
+# order; the first one exits before the second starts.
+#
+# 1) ip rule + ip route for TPROXY (the kernel needs these in
+#    place before any TPROXY iptables rule can actually deliver
+#    packets to a local socket).
+# 2) iptables-restore from the file. StandardInput= is the
+#    systemd-native way to feed a file on stdin — bash-style
+#    "iptables-restore < file" in ExecStart would be passed as a
+#    literal argument and fail with exit 1 (systemd does NOT run
+#    ExecStart through a shell).
+ExecStart=/etc/wgserver/tproxy-routes.sh
+ExecStart=/sbin/iptables-restore
+StandardInput=file:/etc/wgserver/iptables.rules
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+chmod 0644 "$IPTABLES_UNIT"
+
+log "writing xray.service"
+cat > "$XRAY_UNIT" <<EOF
+[Unit]
+Description=xray-core (wgserver transparent exit)
+Documentation=https://github.com/XTLS/Xray-core
+# xray must be up before the wgserver syncer starts handling
+# traffic (it doesn't, but wg0 PostUp's REDIRECT points to xray's
+# port — so xray must accept before wg0 PostUp runs).
+After=network-online.target
+Wants=network-online.target
+Before=wg-quick@wg0.service wgserver.service
 
 [Service]
 Type=simple
-# Run as a dedicated system user so its outbound traffic (e.g. the
-# Telegram bot's long-poll to api.telegram.org) can be policy-routed
-# via the exit WG through a uidrange ip rule (see wg0.conf PostUp).
-# CAP_NET_ADMIN is needed for the syncer to call `wg set` on wg1.
+# Run as a dedicated user that does NOT match the wgserver
+# iptables OUTPUT rule. If xray ran as the wgserver uid, its own
+# VLESS outbound to the remote would itself get REDIRECTed →
+# infinite loop. See AGENTS.md invariant.
+User=xray
+Group=xray
+# CAP_NET_ADMIN is required so xray can do setsockopt(IP_TRANSPARENT)
+# on its listening socket — which lets getsockopt(SO_ORIGINAL_DST)
+# return the original destination of a connection that iptables NAT
+# REDIRECT'd to this listener. Without it, dokodemo-door inbound sees
+# every connection with destination = 127.0.0.1:10808 and cannot
+# figure out where the client actually wanted to go, so it just
+# closes the socket (and the client gets RST). NoNewPrivileges is
+# off because it would block AmbientCapabilities.
+AmbientCapabilities=CAP_NET_ADMIN
+LimitNPROC=10000
+LimitNOFILE=1000000
+ExecStart=$XRAY_PREFIX/xray run -config $XRAY_CONF
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 "$XRAY_UNIT"
+
+log "writing wgserver.service"
+cat > "$SYSTEMD_UNIT" <<'EOF'
+[Unit]
+Description=wgserver: self-hosted WireGuard gateway with xray transparent exit
+Documentation=https://github.com/erazumov/wgserver
+After=network-online.target wg-quick@wg0.service xray.service wgserver-iptables.service
+Wants=network-online.target wg-quick@wg0.service xray.service
+Requires=wgserver-iptables.service
+
+[Service]
+Type=simple
+# Run as a dedicated system user so its outbound (Telegram long-
+# poll to api.telegram.org, future GitHub polls) is caught by the
+# iptables OUTPUT REDIRECT rule (uid match) and tunnelled through
+# xray. CAP_NET_ADMIN is needed by the syncer to call
+# `wg set wg0 peer ...`.
 User=wgserver
 Group=wgserver
 AmbientCapabilities=CAP_NET_ADMIN
@@ -499,19 +741,30 @@ EOF
 chmod 0644 "$SYSTEMD_UNIT"
 
 # -----------------------------------------------------------------------------
-# 12. start the service
+# 14. start services
 # -----------------------------------------------------------------------------
-log "systemctl daemon-reload + enable wgserver"
+log "systemctl daemon-reload + enable wgserver / xray / wgserver-iptables"
 systemctl daemon-reload
-systemctl enable wgserver.service
-systemctl restart wgserver.service
+systemctl enable wgserver-iptables.service
+systemctl enable --now xray.service
+systemctl enable --now wgserver.service
+
+# Sanity: if xray didn't actually start (e.g. operator's config
+# references an unreachable VLESS server), the rest still boots
+# but no traffic flows. Surface that early so the operator
+# notices.
+sleep 1
+if ! systemctl is-active --quiet xray.service; then
+  warn "xray.service is not active. Check: journalctl -u xray -n 50"
+  warn "    /etc/xray/config.json validates as JSON, but xray may be failing on a real outbound."
+fi
 
 # -----------------------------------------------------------------------------
-# 13. summary
+# 15. summary
 # -----------------------------------------------------------------------------
 cat <<EOF
 
-${WG1_PUB}
+${WG0_PUB}
 
 == wgserver installed ==
 
@@ -519,17 +772,27 @@ ${WG1_PUB}
   config:        $CONF_FILE
   env:           $ENV_FILE
   service:       $SYSTEMD_UNIT
-  exit_wg:       $EXIT_WG_ENDPOINT  (pubkey: ${EXIT_WG_PUBKEY:0:16}...)
-  wg1 pubkey:    ${WG1_PUB}
+  xray binary:   $XRAY_PREFIX/xray
+  xray config:   $XRAY_CONF  (operator-managed, NOT touched by wgserver)
+  xray service:  $XRAY_UNIT  (runs as user 'xray')
+  iptables unit: $IPTABLES_UNIT
+  wg0 pubkey:    ${WG0_PUB}
 
   Next steps:
-    1) tail -f journalctl -u wgserver
+    1) tail -f journalctl -u wgserver -u xray
     2) sudo ${BIN_PATH} create-admin -username <name>  (then enter password)
     3) open http://${LISTEN_ADDR}/admin/login
     4) add a peer; download its .conf; import into a WireGuard client
     5) verify traffic:
-         curl https://ifconfig.io  # from a peered client
-       should show the exit_wg server's public IP
+         curl https://ifconfig.io   # from a peered client
+       should show the remote VLESS server's public IP, NOT this host's
 
-  The wg1 server pubkey above is what you put into every client .conf.
+  The wg0 server pubkey above is what you put into every client .conf.
+
+  Verify the wgserver daemon's own outbound goes through xray:
+       sudo -u wgserver curl -sS https://ifconfig.io
+    must differ from:
+       curl -sS https://ifconfig.io   # run as root from the host
+
+  If they match, the OUTPUT REDIRECT rule is missing — see $IPTABLES_RULES.
 EOF

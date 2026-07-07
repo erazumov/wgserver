@@ -21,6 +21,21 @@ type Sender interface {
 	GetUpdates(ctx context.Context, offset, timeout int) ([]Update, error)
 	SendMessage(ctx context.Context, chatID int64, text string) error
 	SendDocument(ctx context.Context, chatID int64, filename string, body []byte, caption string) error
+	// GetMe returns the bot's own info (used by startup self-test to
+	// confirm the token is valid and the bot is reachable).
+	GetMe(ctx context.Context) (*BotInfo, error)
+	// GetChat returns the chat's info (used by startup self-test to
+	// confirm the bot is a member of the configured group, and to
+	// log the title so the operator can eyeball-verify the chat_id).
+	GetChat(ctx context.Context, chatID int64) (*Chat, error)
+}
+
+// BotInfo is the subset of the Telegram getMe result we read.
+type BotInfo struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	IsBot     bool   `json:"is_bot"`
 }
 
 // apiResponse is the envelope every Telegram Bot API call returns.
@@ -172,4 +187,63 @@ func (s *HTTPSender) doSimple(req *http.Request, op string) error {
 		return fmt.Errorf("%s: api error %d: %s", op, env.ErrorCode, env.Description)
 	}
 	return nil
+}
+
+// doDecoded sends a request and decodes the API envelope's "result"
+// into out. Returns an error if the request fails, decoding fails, or
+// the API returns ok=false.
+func (s *HTTPSender) doDecoded(req *http.Request, op string, out any) error {
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%s: read body: %w", op, err)
+	}
+	var env apiResponse
+	if err := json.Unmarshal(body, &env); err != nil {
+		return fmt.Errorf("%s: decode envelope: %w (body=%q)", op, err, string(body))
+	}
+	if !env.OK {
+		return fmt.Errorf("%s: api error %d: %s", op, env.ErrorCode, env.Description)
+	}
+	if out != nil {
+		if err := json.Unmarshal(env.Result, out); err != nil {
+			return fmt.Errorf("%s: decode result: %w", op, err)
+		}
+	}
+	return nil
+}
+
+// GetMe returns the bot's own info. Used by the startup self-test
+// to confirm the token is valid and the bot is reachable.
+func (s *HTTPSender) GetMe(ctx context.Context) (*BotInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.endpoint("getMe"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("getMe: new request: %w", err)
+	}
+	var info BotInfo
+	if err := s.doDecoded(req, "getMe", &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// GetChat returns the chat's info. Used by the startup self-test to
+// confirm the bot is a member of the configured group and to log
+// the title so the operator can verify chat_id.
+func (s *HTTPSender) GetChat(ctx context.Context, chatID int64) (*Chat, error) {
+	q := url.Values{}
+	q.Set("chat_id", strconv.FormatInt(chatID, 10))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.endpoint("getChat")+"?"+q.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("getChat: new request: %w", err)
+	}
+	var c Chat
+	if err := s.doDecoded(req, "getChat", &c); err != nil {
+		return nil, err
+	}
+	return &c, nil
 }

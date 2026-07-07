@@ -1,12 +1,14 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"io"
 	"log"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +24,15 @@ type fakeSender struct {
 	sentMsgs    []sentMessage
 	sentDocs    []sentDocument
 	failSendMsg error
+
+	// Self-test stubs. Tests can pre-set these; if not set, the
+	// defaults are "healthy" (getMe returns a plausible bot, getChat
+	// returns a chat whose id matches whatever the test bot has).
+	me     *BotInfo
+	meErr  error
+	chat   *Chat
+	chatID int64
+	chErr  error
 }
 
 type sentMessage struct {
@@ -89,6 +100,30 @@ func (f *fakeSender) sentDocsCopy() []sentDocument {
 	out := make([]sentDocument, len(f.sentDocs))
 	copy(out, f.sentDocs)
 	return out
+}
+
+func (f *fakeSender) GetMe(_ context.Context) (*BotInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.meErr != nil {
+		return nil, f.meErr
+	}
+	if f.me != nil {
+		return f.me, nil
+	}
+	return &BotInfo{ID: 1, Username: "testbot", FirstName: "Test", IsBot: true}, nil
+}
+
+func (f *fakeSender) GetChat(_ context.Context, chatID int64) (*Chat, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.chErr != nil {
+		return nil, f.chErr
+	}
+	if f.chat != nil {
+		return f.chat, nil
+	}
+	return &Chat{ID: chatID, Title: "test chat", Type: "supergroup"}, nil
 }
 
 func openTestDB(t *testing.T) *sql.DB {
@@ -308,6 +343,121 @@ func TestRun_ProcessesIncomingUpdates(t *testing.T) {
 
 	if len(fs.sentDocsCopy()) != 1 {
 		t.Errorf("docs = %d, want 1", len(fs.sentDocsCopy()))
+	}
+}
+
+// captureLogger returns a logger writing to the returned *bytes.Buffer
+// via a discard-everything-else fallback. Used by the startupCheck
+// tests so we can assert on what the bot logged.
+func captureLogger() (*log.Logger, *syncBuffer) {
+	buf := &syncBuffer{}
+	return log.New(buf, "", 0), buf
+}
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func TestStartupCheck_BothOK(t *testing.T) {
+	bot, fs := newTestBot(t)
+	bot.GroupChatID = -1001
+	fs.me = &BotInfo{ID: 42, Username: "meshdrop_bot", FirstName: "connectme", IsBot: true}
+	fs.chat = &Chat{ID: -1001, Title: "vpn-gateway", Type: "supergroup"}
+
+	logger, buf := captureLogger()
+	bot.Logger = logger
+	bot.startupCheck(context.Background())
+
+	out := buf.String()
+	for _, want := range []string{
+		"getMe OK",
+		"@meshdrop_bot",
+		"getChat OK",
+		"vpn-gateway",
+		"supergroup",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("startupCheck output missing %q\n---\n%s\n---", want, out)
+		}
+	}
+	if strings.Contains(out, "FAILED") {
+		t.Errorf("startupCheck reported FAILED but both calls succeeded:\n%s", out)
+	}
+}
+
+func TestStartupCheck_GetMeFails_LogsButContinues(t *testing.T) {
+	bot, fs := newTestBot(t)
+	fs.meErr = errors.New("api error 401: Unauthorized")
+
+	logger, buf := captureLogger()
+	bot.Logger = logger
+	bot.startupCheck(context.Background())
+
+	out := buf.String()
+	if !strings.Contains(out, "getMe FAILED") {
+		t.Errorf("startupCheck must log getMe FAILED, got:\n%s", out)
+	}
+	if !strings.Contains(out, "401") {
+		t.Errorf("startupCheck should include underlying error, got:\n%s", out)
+	}
+	// Must NOT panic, must continue to the getChat call. The
+	// operator at least sees the token problem and the chat-miss
+	// hint together.
+	if !strings.Contains(out, "getChat") {
+		t.Errorf("startupCheck should still attempt getChat after getMe fails, got:\n%s", out)
+	}
+}
+
+func TestStartupCheck_GetChatFails_ListsCommonCauses(t *testing.T) {
+	bot, fs := newTestBot(t)
+	bot.GroupChatID = -1001
+	fs.chErr = errors.New("api error 400: Bad Request: chat not found")
+
+	logger, buf := captureLogger()
+	bot.Logger = logger
+	bot.startupCheck(context.Background())
+
+	out := buf.String()
+	for _, want := range []string{
+		"getChat(-1001) FAILED",
+		"chat not found",
+		"most common 'bot ignores /start' cause",
+		"not a member",
+		"chat_id in wgserver.yaml is wrong",
+		"kicked/blocked",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("startupCheck output missing %q\n---\n%s\n---", want, out)
+		}
+	}
+}
+
+func TestStartupCheck_NoGroupConfigured_SkipsGetChat(t *testing.T) {
+	bot, _ := newTestBot(t)
+	bot.GroupChatID = 0 // operator disabled the bot
+
+	logger, buf := captureLogger()
+	bot.Logger = logger
+	bot.startupCheck(context.Background())
+
+	out := buf.String()
+	if !strings.Contains(out, "no group_chat_id configured") {
+		t.Errorf("startupCheck must explain why getChat was skipped, got:\n%s", out)
+	}
+	if strings.Contains(out, "getChat OK") {
+		t.Errorf("getChat must not be called when group_chat_id is 0:\n%s", out)
 	}
 }
 

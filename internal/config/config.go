@@ -10,7 +10,6 @@ import (
 type Config struct {
 	HTTP     HTTPConfig     `yaml:"http"`
 	DB       DBConfig       `yaml:"db"`
-	ExitWG   ExitWGConfig   `yaml:"exit_wg"`
 	Clients  ClientsConfig  `yaml:"clients"`
 	Telegram TelegramConfig `yaml:"telegram"`
 	Update   UpdateConfig   `yaml:"update"`
@@ -44,20 +43,6 @@ type DBConfig struct {
 	Path string `yaml:"path"`
 }
 
-type ExitWGConfig struct {
-	Interface  string `yaml:"interface"`
-	ListenPort int    `yaml:"listen_port"`
-	Address    string `yaml:"address"`
-	Peer       WGPeer `yaml:"peer"`
-}
-
-type WGPeer struct {
-	Endpoint            string `yaml:"endpoint"`
-	PublicKey           string `yaml:"public_key"`
-	AllowedIPs          string `yaml:"allowed_ips"`
-	PersistentKeepalive int    `yaml:"persistent_keepalive"`
-}
-
 type ClientsConfig struct {
 	Interface  string   `yaml:"interface"`
 	ListenPort int      `yaml:"listen_port"`
@@ -69,7 +54,7 @@ type ClientsConfig struct {
 	// May differ from listen_port when the server is behind NAT/port-forward.
 	Endpoint string `yaml:"endpoint"`
 
-	// PublicKey is the wg1 interface's public key (base64). It goes into
+	// PublicKey is the wg0 interface's public key (base64). It goes into
 	// the [Peer] section of every client .conf we hand out. Private key
 	// for this interface is not in config — it is generated and persisted
 	// at first boot.

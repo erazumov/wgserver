@@ -5,25 +5,15 @@ http:
 db:
   path: "/tmp/wgserver-smoke.sqlite"
 
-exit_wg:
+clients:
   interface: "wg0"
   listen_port: 51820
-  address: "10.0.0.1/24"
-  peer:
-    endpoint: "127.0.0.1:51820"
-    public_key: "REPLACE_WITH_EXIT_WG_PUBKEY_BASE64="
-    allowed_ips: "0.0.0.0/0"
-    persistent_keepalive: 25
-
-clients:
-  interface: "wg1"
-  listen_port: 51821
   address: "10.0.1.1/24"
   cidr: "10.0.1.0/24"
   dns_servers:
     - "1.1.1.1"
-  endpoint: "127.0.0.1:51821"
-  public_key: "WG1_PUB_BASE64"
+  endpoint: "127.0.0.1:51820"
+  public_key: "WG0_PUB_BASE64"
 
 telegram:
   bot_token: "REPLACE_ME"

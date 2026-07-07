@@ -147,11 +147,12 @@ func serve(cfg *config.Config) error {
 		healthSrv = &http.Server{Handler: app.NewPublicRouter()}
 	}
 
-	// Sync loop reconciles peers.pending_sync=1 against the wg1
-	// interface. One immediate RunOnce picks up anything that
-	// accumulated while the server was down; subsequent ticks handle
-	// new admin/TG actions. The loop shares the same context as the
-	// HTTP server so a SIGINT stops both.
+	// Sync loop reconciles peers.pending_sync=1 against the wg0
+	// interface (the single WireGuard interface; clients peer here,
+	// transparent-proxy out via xray — see AGENTS.md). One immediate
+	// RunOnce picks up anything that accumulated while the server was
+	// down; subsequent ticks handle new admin/TG actions. The loop
+	// shares the same context as the HTTP server so a SIGINT stops both.
 	//
 	// PSKDir holds per-peer preshared-key files. wireguard-tools
 	// 1.0.20210914 (Debian 12) requires the `preshared-key` value of

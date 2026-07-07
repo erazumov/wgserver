@@ -2,20 +2,25 @@ package wg
 
 import (
 	"errors"
+	"io"
 	"os/exec"
 	"testing"
 )
 
 type fakeCall struct {
-	Name string
-	Args []string
+	Name   string
+	Args   []string
+	StdinR io.Reader
 }
 
 type fakeRunner struct {
-	calls       []fakeCall
-	runErr      error
-	outputs     map[string]string
-	outputCalls []fakeCall
+	calls        []fakeCall
+	runErr       error
+	outputs      map[string]string
+	outputCalls  []fakeCall
+	stdinCalls   []fakeCall
+	stdinOutputs map[string]string
+	stdinErr     error
 }
 
 func (f *fakeRunner) Run(name string, args ...string) error {
@@ -45,6 +50,21 @@ func (f *fakeRunner) Output(name string, args ...string) (string, error) {
 	return "", errors.New("fakeRunner: no output configured for " + outputKey(name, cp))
 }
 
+func (f *fakeRunner) OutputStdin(name string, args []string, stdin io.Reader) (string, error) {
+	cp := make([]string, len(args))
+	copy(cp, args)
+	f.stdinCalls = append(f.stdinCalls, fakeCall{Name: name, Args: cp, StdinR: stdin})
+	if f.stdinErr != nil {
+		return "", f.stdinErr
+	}
+	for k, v := range f.stdinOutputs {
+		if k == outputKey(name, cp) {
+			return v, nil
+		}
+	}
+	return "", errors.New("fakeRunner: no stdin output configured for " + outputKey(name, cp))
+}
+
 func outputKey(name string, args []string) string {
 	if len(args) == 0 {
 		return name
@@ -65,13 +85,13 @@ func joinArgs(a []string) string {
 
 func TestFakeRunner_RecordsRunCalls(t *testing.T) {
 	r := &fakeRunner{}
-	if err := r.Run("wg", "set", "wg1"); err != nil {
+	if err := r.Run("wg", "set", "wg0"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(r.calls) != 1 {
 		t.Fatalf("calls = %d, want 1", len(r.calls))
 	}
-	if r.calls[0].Name != "wg" || r.calls[0].Args[0] != "set" || r.calls[0].Args[1] != "wg1" {
+	if r.calls[0].Name != "wg" || r.calls[0].Args[0] != "set" || r.calls[0].Args[1] != "wg0" {
 		t.Errorf("call = %+v", r.calls[0])
 	}
 }
@@ -92,7 +112,7 @@ func TestFakeRunner_RecordsOutputCalls(t *testing.T) {
 
 func TestFakeRunner_RunReturnsConfiguredError(t *testing.T) {
 	r := &fakeRunner{runErr: errors.New("boom")}
-	err := r.Run("wg", "set", "wg1")
+	err := r.Run("wg", "set", "wg0")
 	if err == nil || err.Error() != "boom" {
 		t.Errorf("err = %v, want boom", err)
 	}

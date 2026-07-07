@@ -8,21 +8,20 @@
 #
 # Required in env (file or shell):
 #   DEPLOY_HOST                  ssh target, e.g. root@taigaproxy
-#   WGSERVER_EXIT_WG_ENDPOINT    host:port of the upstream WireGuard
-#   WGSERVER_EXIT_WG_PUBKEY      base64 public key of the upstream peer
 #   WGSERVER_TG_BOT_TOKEN        Telegram bot token (can be empty to disable bot)
 #   WGSERVER_TG_CHAT_ID          group chat id (0 to disable bot)
 # Optional:
 #   WGSERVER_TG_QUOTA            per-user quota (default 2)
 #   WGSERVER_LISTEN_ADDR         admin UI listen (default 127.0.0.1:8080)
 #   WGSERVER_HEALTH_ADDR         /healthz listen (default 127.0.0.1:9090)
+#   WGSERVER_XRAY_VERSION        pin xray release tag (default: latest)
 #   VERSION                      override version string (default: git describe)
 #   REMOTE_TMP                   remote staging dir (default /tmp)
 #   ENABLE_UPDATER               1 to install wgserver-updater + timer (default 1)
 #
 # This script is safe to re-run: install.sh is idempotent, the binaries
-# are re-uploaded, the service is restarted. Existing /etc/wgserver/*
-# and /etc/wireguard/* are preserved.
+# are re-uploaded, the service is restarted. Existing /etc/wgserver/*,
+# /etc/wireguard/* and /etc/xray/config.json are preserved.
 
 set -euo pipefail
 
@@ -76,13 +75,12 @@ command -v scp >/dev/null || die "scp not in PATH"
 
 # ---- required inputs ----
 : "${DEPLOY_HOST:?DEPLOY_HOST is required (e.g. root@taigaproxy)}"
-: "${WGSERVER_EXIT_WG_ENDPOINT:?WGSERVER_EXIT_WG_ENDPOINT is required}"
-: "${WGSERVER_EXIT_WG_PUBKEY:?WGSERVER_EXIT_WG_PUBKEY is required}"
 : "${WGSERVER_TG_BOT_TOKEN:=}"
 : "${WGSERVER_TG_CHAT_ID:=0}"
 : "${WGSERVER_TG_QUOTA:=2}"
 : "${WGSERVER_LISTEN_ADDR:=127.0.0.1:8080}"
 : "${WGSERVER_HEALTH_ADDR:=127.0.0.1:9090}"
+: "${WGSERVER_XRAY_VERSION:=}"
 : "${REMOTE_TMP:=/tmp}"
 : "${ENABLE_UPDATER:=1}"
 
@@ -133,7 +131,7 @@ run scp -q \
 # ---- install (server-side) ----
 # Multiline env-via-ssh-string is fragile: different shells on the
 # remote side parse newlines in a single ssh command argument
-# differently, and install.sh then sees an empty WGSERVER_EXIT_WG_*
+# differently, and install.sh then sees empty WGSERVER_TG_*
 # even though we set it. Stash the env in a file on the server and
 # source it. Works with any login shell (bash, zsh, dash).
 log "uploading deploy.env to $DEPLOY_HOST:$REMOTE_TMP/"

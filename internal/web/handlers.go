@@ -212,7 +212,7 @@ func (a *App) PeerRevokePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// DisablePeer also sets pending_sync=1 so the sync loop calls
-	// `wg set wg1 peer <pubkey> remove`. (See AGENTS.md invariant.)
+	// `wg set wg0 peer <pubkey> remove`. (See AGENTS.md invariant.)
 	http.Redirect(w, r, "/admin/", http.StatusFound)
 }
 

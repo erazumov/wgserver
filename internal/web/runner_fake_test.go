@@ -1,6 +1,7 @@
 package web
 
 import (
+	"io"
 	"strings"
 
 	"github.com/erazumov/wgserver/internal/wg"
@@ -45,6 +46,12 @@ func (f *fakeRunner) Output(name string, args ...string) (string, error) {
 			case "genkey":
 				return f.genkey, nil
 			case "pubkey":
+				// Production code path: wg pubkey now goes
+				// through OutputStdin (we pipe the privkey via
+				// stdin rather than passing the file as an
+				// argument). But the fake delegates OutputStdin
+				// to Output for simplicity, so this case must
+				// still respond with a non-empty pubkey.
 				return f.pubkey, nil
 			case "genpsk":
 				return f.psk, nil
@@ -52,6 +59,15 @@ func (f *fakeRunner) Output(name string, args ...string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// OutputStdin is the stdin-fed variant of Output. The production
+// keys.go uses it for `wg pubkey` (which reads the privkey from
+// stdin rather than an argument). The handler tests don't exercise
+// the bot's keygen path, so this is a thin wrapper around Output
+// — we just need it to satisfy the wg.Runner interface.
+func (f *fakeRunner) OutputStdin(name string, args []string, _ io.Reader) (string, error) {
+	return f.Output(name, args...)
 }
 
 var _ wg.Runner = (*fakeRunner)(nil)

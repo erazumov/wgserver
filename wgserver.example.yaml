@@ -19,29 +19,21 @@ http:
 db:
   path: "/var/lib/wgserver/db.sqlite"
 
-# Outbound WireGuard peer — all client traffic is routed through it.
-exit_wg:
+# The single WireGuard interface. Clients peer here; per-client peers
+# are applied by the syncer via `wg set wg0 peer ...`. wg0.conf MUST
+# contain zero [Peer] sections. All client traffic is transparently
+# redirected to a local xray-core (VLESS Reality) client via iptables
+# REDIRECT — see deploy/install.sh.
+clients:
   interface: "wg0"
   listen_port: 51820
-  address: "10.0.0.1/24"
-  peer:
-    endpoint: "REPLACE_WITH_EXIT_WG_HOST:51820"
-    public_key: "REPLACE_WITH_EXIT_WG_PUBKEY_BASE64="
-    allowed_ips: "0.0.0.0/0"
-    persistent_keepalive: 25
-
-# Per-client WireGuard interface. Clients peer here; traffic is forwarded
-# out via exit_wg. Do not add client peers to exit_wg.
-clients:
-  interface: "wg1"
-  listen_port: 51821
   address: "10.0.1.1/24"
   cidr: "10.0.1.0/24"
   dns_servers:
     - "1.1.1.1"
     - "9.9.9.9"
-  endpoint: "REPLACE_WITH_PUBLIC_HOST:51821"
-  public_key: "REPLACE_WITH_WG1_PUBLIC_KEY_BASE64="
+  endpoint: "REPLACE_WITH_PUBLIC_HOST:51820"
+  public_key: "REPLACE_WITH_WG0_PUBLIC_KEY_BASE64="
 
 telegram:
   bot_token: "REPLACE_WITH_TELEGRAM_BOT_TOKEN"

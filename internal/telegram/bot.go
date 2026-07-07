@@ -58,6 +58,15 @@ func (b *Bot) Run(ctx context.Context) {
 	if b.PollTimeout <= 0 {
 		b.PollTimeout = 25 * time.Second
 	}
+
+	// Startup self-test: confirm the token is valid and the bot is
+	// in the configured group, BEFORE we start claiming we can hear
+	// messages. Failures are logged loudly but the loop still starts
+	// — a transient API outage at boot shouldn't take the daemon
+	// down, and the long-poll will surface the same problem on
+	// every tick anyway.
+	b.startupCheck(ctx)
+
 	var offset int64
 	for {
 		if err := ctx.Err(); err != nil {
@@ -84,6 +93,47 @@ func (b *Bot) Run(ctx context.Context) {
 				offset = u.UpdateID
 			}
 		}
+	}
+}
+
+// startupCheck pings the Bot API to confirm the token is valid and
+// the bot is in the configured group. Logs OK / FAIL for each. Does
+// not return an error — failures are diagnostic, not fatal: a
+// transient API outage at boot shouldn't take the daemon down, and
+// the long-poll loop will surface the same problem on every tick.
+func (b *Bot) startupCheck(ctx context.Context) {
+	me, err := b.Sender.GetMe(ctx)
+	if err != nil {
+		b.Logger.Printf("telegram: startup: getMe FAILED: %v", err)
+		b.Logger.Printf("telegram: startup: bot will still attempt long-poll, but every /start will fail until this is fixed")
+	} else {
+		username := me.Username
+		if username != "" {
+			username = "@" + username
+		}
+		b.Logger.Printf("telegram: startup: getMe OK — bot id=%d %s (%q)", me.ID, username, me.FirstName)
+	}
+
+	if b.GroupChatID == 0 {
+		b.Logger.Printf("telegram: startup: no group_chat_id configured, skipping getChat")
+		return
+	}
+
+	chat, err := b.Sender.GetChat(ctx, b.GroupChatID)
+	if err != nil {
+		b.Logger.Printf("telegram: startup: getChat(%d) FAILED: %v", b.GroupChatID, err)
+		b.Logger.Printf("telegram: startup: this is the most common 'bot ignores /start' cause. likely:")
+		b.Logger.Printf("telegram: startup:   - the bot is not a member of chat_id %d", b.GroupChatID)
+		b.Logger.Printf("telegram: startup:   - the chat_id in wgserver.yaml is wrong (typo, missing '-100' prefix for supergroups)")
+		b.Logger.Printf("telegram: startup:   - the bot was kicked/blocked from the group")
+		return
+	}
+	b.Logger.Printf("telegram: startup: getChat OK — id=%d title=%q type=%s", chat.ID, chat.Title, chat.Type)
+	if chat.ID != b.GroupChatID {
+		// Telegram normalises the chat_id on the response, so this
+		// mismatch would mean the configured one is in a different
+		// namespace (rare) or stale.
+		b.Logger.Printf("telegram: startup: WARNING configured group_chat_id=%d but API returned id=%d", b.GroupChatID, chat.ID)
 	}
 }
 

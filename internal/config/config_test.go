@@ -17,26 +17,16 @@ http:
 db:
   path: "/var/lib/wgserver/db.sqlite"
 
-exit_wg:
+clients:
   interface: "wg0"
   listen_port: 51820
-  address: "10.0.0.1/24"
-  peer:
-    endpoint: "vpn.example.com:51820"
-    public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-    allowed_ips: "0.0.0.0/0"
-    persistent_keepalive: 25
-
-clients:
-  interface: "wg1"
-  listen_port: 51821
   address: "10.0.1.1/24"
   cidr: "10.0.1.0/24"
   dns_servers:
     - "1.1.1.1"
     - "9.9.9.9"
-  endpoint: "vpn.example.com:51821"
-  public_key: "PUBKEY_WG1_BASE64="
+  endpoint: "vpn.example.com:51820"
+  public_key: "PUBKEY_WG0_BASE64="
 
 telegram:
   bot_token: "REPLACE_ME"
@@ -71,29 +61,19 @@ func TestLoad_ParsesAllSections(t *testing.T) {
 		t.Errorf("DB.Path = %q, want %q", got, want)
 	}
 
-	if got, want := cfg.ExitWG.Interface, "wg0"; got != want {
-		t.Errorf("ExitWG.Interface = %q, want %q", got, want)
-	}
-	if got, want := cfg.ExitWG.ListenPort, 51820; got != want {
-		t.Errorf("ExitWG.ListenPort = %d, want %d", got, want)
-	}
-	if got, want := cfg.ExitWG.Peer.Endpoint, "vpn.example.com:51820"; got != want {
-		t.Errorf("ExitWG.Peer.Endpoint = %q, want %q", got, want)
-	}
-	if got, want := cfg.ExitWG.Peer.PersistentKeepalive, 25; got != want {
-		t.Errorf("ExitWG.Peer.PersistentKeepalive = %d, want %d", got, want)
-	}
-
-	if got, want := cfg.Clients.Interface, "wg1"; got != want {
+	if got, want := cfg.Clients.Interface, "wg0"; got != want {
 		t.Errorf("Clients.Interface = %q, want %q", got, want)
+	}
+	if got, want := cfg.Clients.ListenPort, 51820; got != want {
+		t.Errorf("Clients.ListenPort = %d, want %d", got, want)
 	}
 	if got, want := len(cfg.Clients.DNSServers), 2; got != want {
 		t.Errorf("Clients.DNSServers len = %d, want %d", got, want)
 	}
-	if got, want := cfg.Clients.Endpoint, "vpn.example.com:51821"; got != want {
+	if got, want := cfg.Clients.Endpoint, "vpn.example.com:51820"; got != want {
 		t.Errorf("Clients.Endpoint = %q, want %q", got, want)
 	}
-	if got, want := cfg.Clients.PublicKey, "PUBKEY_WG1_BASE64="; got != want {
+	if got, want := cfg.Clients.PublicKey, "PUBKEY_WG0_BASE64="; got != want {
 		t.Errorf("Clients.PublicKey = %q, want %q", got, want)
 	}
 

@@ -2,6 +2,7 @@ package wg
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,10 @@ func (p *pskRunner) Output(name string, args ...string) (string, error) {
 		return "", p.err
 	}
 	return p.out, nil
+}
+
+func (p *pskRunner) OutputStdin(name string, args []string, _ io.Reader) (string, error) {
+	return p.Output(name, args...)
 }
 
 func TestGeneratePresharedKey_OK(t *testing.T) {

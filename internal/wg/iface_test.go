@@ -10,13 +10,13 @@ import (
 
 func TestAddPeer_NoPresharedKey(t *testing.T) {
 	r := &fakeRunner{}
-	if err := AddPeer(r, "wg1", "PUBKEY_X", "10.0.1.2/32", t.TempDir(), ""); err != nil {
+	if err := AddPeer(r, "wg0", "PUBKEY_X", "10.0.1.2/32", t.TempDir(), ""); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
 	if len(r.calls) != 1 {
 		t.Fatalf("calls = %d, want 1", len(r.calls))
 	}
-	want := []string{"set", "wg1", "peer", "PUBKEY_X", "allowed-ips", "10.0.1.2/32"}
+	want := []string{"set", "wg0", "peer", "PUBKEY_X", "allowed-ips", "10.0.1.2/32"}
 	got := r.calls[0].Args
 	if r.calls[0].Name != "wg" || !equalStrings(got, want) {
 		t.Errorf("call = wg %v, want wg %v", got, want)
@@ -26,13 +26,13 @@ func TestAddPeer_NoPresharedKey(t *testing.T) {
 func TestAddPeer_WithPresharedKey(t *testing.T) {
 	r := &fakeRunner{}
 	dir := t.TempDir()
-	if err := AddPeer(r, "wg1", "PUBKEY_X", "10.0.1.2/32", dir, "PSK_BASE64"); err != nil {
+	if err := AddPeer(r, "wg0", "PUBKEY_X", "10.0.1.2/32", dir, "PSK_BASE64"); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
 	if len(r.calls) != 1 {
 		t.Fatalf("calls = %d, want 1", len(r.calls))
 	}
-	wantPrefix := []string{"set", "wg1", "peer", "PUBKEY_X", "allowed-ips", "10.0.1.2/32", "preshared-key"}
+	wantPrefix := []string{"set", "wg0", "peer", "PUBKEY_X", "allowed-ips", "10.0.1.2/32", "preshared-key"}
 	got := r.calls[0].Args
 	if r.calls[0].Name != "wg" || len(got) != len(wantPrefix)+1 {
 		t.Fatalf("call = wg %v, want wg <prefix>+1", got)
@@ -69,7 +69,7 @@ func TestAddPeer_WithPresharedKey(t *testing.T) {
 func TestAddPeer_PresharedKeyCreatesDir(t *testing.T) {
 	r := &fakeRunner{}
 	dir := filepath.Join(t.TempDir(), "nested", "psk")
-	if err := AddPeer(r, "wg1", "PUBKEY_X", "10.0.1.2/32", dir, "PSK"); err != nil {
+	if err := AddPeer(r, "wg0", "PUBKEY_X", "10.0.1.2/32", dir, "PSK"); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
@@ -79,7 +79,7 @@ func TestAddPeer_PresharedKeyCreatesDir(t *testing.T) {
 
 func TestAddPeer_RunnerError(t *testing.T) {
 	r := &fakeRunner{runErr: errors.New("set failed")}
-	err := AddPeer(r, "wg1", "PUBKEY_X", "10.0.1.2/32", t.TempDir(), "")
+	err := AddPeer(r, "wg0", "PUBKEY_X", "10.0.1.2/32", t.TempDir(), "")
 	if err == nil {
 		t.Fatal("AddPeer: want error, got nil")
 	}
@@ -92,7 +92,7 @@ func TestAddPeer_PSKPathHandlesBase64Chars(t *testing.T) {
 	dir := t.TempDir()
 	// Pubkey contains both '+' and '/'.
 	pub := "abc+def/ghi="
-	if err := AddPeer(r, "wg1", pub, "10.0.1.2/32", dir, "PSK"); err != nil {
+	if err := AddPeer(r, "wg0", pub, "10.0.1.2/32", dir, "PSK"); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
 	pskPath := r.calls[0].Args[len(r.calls[0].Args)-1]
@@ -109,10 +109,10 @@ func TestRemovePeer(t *testing.T) {
 	if _, err := writePSKFile(dir, pub, "PSK_BASE64"); err != nil {
 		t.Fatalf("writePSKFile: %v", err)
 	}
-	if err := RemovePeer(r, "wg1", dir, pub); err != nil {
+	if err := RemovePeer(r, "wg0", dir, pub); err != nil {
 		t.Fatalf("RemovePeer: %v", err)
 	}
-	want := []string{"set", "wg1", "peer", pub, "remove"}
+	want := []string{"set", "wg0", "peer", pub, "remove"}
 	got := r.calls[0].Args
 	if r.calls[0].Name != "wg" || !equalStrings(got, want) {
 		t.Errorf("call = wg %v, want wg %v", got, want)
@@ -124,7 +124,7 @@ func TestRemovePeer(t *testing.T) {
 
 func TestRemovePeer_RunnerError(t *testing.T) {
 	r := &fakeRunner{runErr: errors.New("remove failed")}
-	err := RemovePeer(r, "wg1", t.TempDir(), "PUBKEY_X")
+	err := RemovePeer(r, "wg0", t.TempDir(), "PUBKEY_X")
 	if err == nil {
 		t.Fatal("RemovePeer: want error, got nil")
 	}
@@ -134,7 +134,7 @@ func TestRemovePeer_NoPSKFileIsNotFatal(t *testing.T) {
 	// RemovePeer should succeed even if the PSK file is missing —
 	// e.g. a peer added without a PSK never had a file written.
 	r := &fakeRunner{}
-	if err := RemovePeer(r, "wg1", t.TempDir(), "PUBKEY_X"); err != nil {
+	if err := RemovePeer(r, "wg0", t.TempDir(), "PUBKEY_X"); err != nil {
 		t.Fatalf("RemovePeer: %v", err)
 	}
 }
