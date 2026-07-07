@@ -8,10 +8,10 @@
 #   * wg0       — single WireGuard interface, clients peer here
 #                 (no [Peer] sections in wg0.conf; peers are applied
 #                 by the syncer via `wg set wg0 peer ...`)
-#   * xray      — dokodemo-door inbound on 127.0.0.1:10808
+#   * xray      — dokodemo-door inbound on $XRAY_LISTEN_IP:$XRAY_INBOUND_PORT (default 192.0.2.1:10808)
 #                 VLESS Reality outbound to the remote
 #   * iptables  — REDIRECT wg0 PREROUTING (tcp/udp) + wgserver uid
-#                 OUTPUT (tcp/udp) → 127.0.0.1:10808
+#                 OUTPUT (tcp/udp) → ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT}
 #   * wgserver  — admin UI + sync-loop, runs as the wgserver system
 #                 user. iptables OUTPUT rule catches its outbound
 #                 (Telegram long-poll, future GitHub polls) and
@@ -27,7 +27,7 @@
 #   ./install.sh /path/to/wgserver-linux-amd64
 #
 # Required on first install: /etc/xray/config.json (operator-managed,
-# must have a dokodemo-door inbound on 127.0.0.1:10808; install.sh
+# must have a dokodemo-door inbound on $XRAY_LISTEN_IP:$XRAY_INBOUND_PORT; install.sh
 # validates and aborts with a clear error otherwise). See
 # AGENTS.md invariant "xray config is operator-managed".
 #
@@ -65,6 +65,19 @@ XRAY_INBOUND_PORT=10808
 # before wg0.conf is written in section 4.
 TPROXY_MARK=0x1
 TPROXY_TABLE=100
+
+# Non-loopback local IP that xray listens on. 192.0.2.0/24 is
+# TEST-NET-1 (RFC 5737), reserved for documentation, not routable
+# on the public internet, never assigned to any real host. We use it
+# instead of 127.0.0.1 to bypass xray-core's anti-loopback check in
+# app/proxyman/inbound/worker.go: when xray is bound to 127.0.0.1,
+# the check `w.hub.Addr().String() == dest.NetAddr()` matches for
+# REDIRECT'd peer traffic (the original destination read via
+# SO_ORIGINAL_DST resolves to the same IP:port as xray's listener),
+# and xray drops the connection with "loopback connection detected".
+# A non-loopback IP makes the inequality always hold, so the check
+# passes. /etc/xray/config.json MUST set `listen` to the same value.
+XRAY_LISTEN_IP=192.0.2.1
 
 # -----------------------------------------------------------------------------
 # helpers
@@ -297,8 +310,8 @@ PrivateKey = ${WG0_PRIV}
 ListenPort = 51820
 Address = ${CLIENTS_ADDR}
 
-PostUp =  iptables -t nat -C PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT} 2>/dev/null || iptables -t nat -A PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT}; iptables -t mangle -C PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} 2>/dev/null || iptables -t mangle -A PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT}
-PreDown = iptables -t nat -D PREROUTING -i %i -p tcp -j REDIRECT --to-ports ${XRAY_INBOUND_PORT} 2>/dev/null || true; iptables -t mangle -D PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} 2>/dev/null || true
+PostUp =  iptables -t nat -C PREROUTING -i %i -p tcp -j DNAT --to-destination ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT} 2>/dev/null || iptables -t nat -A PREROUTING -i %i -p tcp -j DNAT --to-destination ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT}; iptables -t mangle -C PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} --on-ip ${XRAY_LISTEN_IP} 2>/dev/null || iptables -t mangle -A PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} --on-ip ${XRAY_LISTEN_IP}
+PreDown = iptables -t nat -D PREROUTING -i %i -p tcp -j DNAT --to-destination ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT} 2>/dev/null || true; iptables -t mangle -D PREROUTING -i %i -p udp -j TPROXY --tproxy-mark ${TPROXY_MARK}/${TPROXY_MARK} --on-port ${XRAY_INBOUND_PORT} --on-ip ${XRAY_LISTEN_IP} 2>/dev/null || true
 EOF
 
 if [ -f "$WG0_CONF" ] && cmp -s "$WG0_CONF" "$NEW_WG0_CONF"; then
@@ -429,14 +442,14 @@ fi
 # invariant "xray config is operator-managed". The only thing
 # install.sh does is validate that the file exists, parses as
 # JSON, and the first inbound is dokodemo-door on
-# 127.0.0.1:10808 (the port the iptables REDIRECT sends to).
+# ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT} (the port the iptables DNAT/TPROXY rewrites dst to).
 # -----------------------------------------------------------------------------
 if [ ! -f "$XRAY_CONF" ]; then
   die "/etc/xray/config.json not found. The operator must write it BEFORE running install.sh. Minimal example:
     {
       \"log\": { \"loglevel\": \"warning\" },
       \"inbounds\": [{
-        \"listen\": \"127.0.0.1\", \"port\": ${XRAY_INBOUND_PORT},
+        \"listen\": \"${XRAY_LISTEN_IP}\", \"port\": ${XRAY_INBOUND_PORT},
         \"protocol\": \"dokodemo-door\",
         \"settings\": { \"network\": \"tcp,udp\", \"followRedirect\": true },
         \"tag\": \"transparent\"
@@ -475,8 +488,8 @@ FIRST_INBOUND_PORT=$(jq -r '.inbounds[0].port // ""' "$XRAY_CONF")
   || die "first inbound protocol must be \"dokodemo-door\" (got \"$FIRST_INBOUND_PROTO\"). SOCKS / mixed / http do not work with iptables REDIRECT." \
        "Fix: jq '.inbounds[0] |= (.protocol = \"dokodemo-door\" | .settings = {\"network\": \"tcp,udp\", \"followRedirect\": true})' $XRAY_CONF > /tmp/xc && mv /tmp/xc $XRAY_CONF && chown root:xray $XRAY_CONF && chmod 0640 $XRAY_CONF && systemctl restart xray"
 
-[ "$FIRST_INBOUND_LISTEN" = "127.0.0.1" ] \
-  || die "first inbound listen must be \"127.0.0.1\" (got \"$FIRST_INBOUND_LISTEN\")."
+[ "$FIRST_INBOUND_LISTEN" = "$XRAY_LISTEN_IP" ] \
+  || die "first inbound listen must be \"$XRAY_LISTEN_IP\" (got \"$FIRST_INBOUND_LISTEN\"). Set \`listen\` to match XRAY_LISTEN_IP in deploy/install.sh (default 192.0.2.1 — see AGENTS.md 'xray is the exit')."
 
 [ "$FIRST_INBOUND_PORT" = "$XRAY_INBOUND_PORT" ] \
   || die "first inbound port must be ${XRAY_INBOUND_PORT} (got \"$FIRST_INBOUND_PORT\")."
@@ -489,7 +502,7 @@ FIRST_INBOUND_NET=$(jq -r '.inbounds[0].settings.network // ""' "$XRAY_CONF")
 [ "$FIRST_INBOUND_NET" = "tcp,udp" ] \
   || warn "first inbound settings.network is \"${FIRST_INBOUND_NET}\" (recommended \"tcp,udp\" to cover both client traffic types)"
 
-log "xray config validated: dokodemo-door on 127.0.0.1:${XRAY_INBOUND_PORT}"
+log "xray config validated: dokodemo-door on ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT}"
 
 # Verify that every VLESS outbound's vnext address is resolvable
 # from the host. If not, xray will sit silently retrying
@@ -539,7 +552,7 @@ chmod 0640 "$XRAY_CONF"
 #   UDP: iptables -t mangle -j TPROXY (mangle table)
 #     — for UDP, REDIRECT only updates the post-NAT dst in
 #       conntrack (the kernel does NOT populate SO_ORIGINAL_DST
-#       the same way as for TCP), so xray sees dst=127.0.0.1:10808
+#       the same way as for TCP), so xray sees dst=${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT}
 #       and tunnels to itself instead of the real target.
 #       TPROXY preserves the original dst in the socket the
 #       listener receives. Trade-off: TPROXY needs IP_TRANSPARENT
@@ -559,13 +572,21 @@ chmod 0640 "$XRAY_CONF"
 # -----------------------------------------------------------------------------
 
 install_output_rules() {
-  # TCP — nat REDIRECT (works, preserves dst for xray)
-  iptables -t nat -C OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p tcp -j REDIRECT --to-ports "$XRAY_INBOUND_PORT" 2>/dev/null \
-    || iptables -t nat -A OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p tcp -j REDIRECT --to-ports "$XRAY_INBOUND_PORT"
-  # UDP — mangle TPROXY (preserves dst; the only way to make
-  # dokodemo-door read the real destination for UDP packets).
-  iptables -t mangle -C OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p udp -j TPROXY --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" --on-port "$XRAY_INBOUND_PORT" 2>/dev/null \
-    || iptables -t mangle -A OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p udp -j TPROXY --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" --on-port "$XRAY_INBOUND_PORT" \
+  # TCP — nat DNAT to the non-loopback xray IP (see comment block
+  # above install_masquerade_peers and AGENTS.md "xray is the exit").
+  # Using a non-loopback IP bypasses xray-core's anti-loopback check
+  # in app/proxyman/inbound/worker.go (w.hub.Addr() == dest.NetAddr()
+  # would otherwise reject REDIRECTed traffic whose GetOriginalDestination
+  # resolves to the same IP:port as xray's listener).
+  iptables -t nat -C OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p tcp -j DNAT --to-destination "$XRAY_LISTEN_IP:$XRAY_INBOUND_PORT" 2>/dev/null \
+    || iptables -t nat -A OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p tcp -j DNAT --to-destination "$XRAY_LISTEN_IP:$XRAY_INBOUND_PORT"
+  # UDP — mangle TPROXY (preserves original dst for xray; only way
+  # to make dokodemo-door read the real destination for UDP packets).
+  # --on-ip is the local address the kernel rewrites dst to; using
+  # $XRAY_LISTEN_IP (not 0.0.0.0) keeps UDP in the same anti-loopback-
+  # safe pattern as TCP DNAT above.
+  iptables -t mangle -C OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p udp -j TPROXY --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" --on-port "$XRAY_INBOUND_PORT" --on-ip "$XRAY_LISTEN_IP" 2>/dev/null \
+    || iptables -t mangle -A OUTPUT -m owner --uid-owner "$WGSERVER_UID" -p udp -j TPROXY --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" --on-port "$XRAY_INBOUND_PORT" --on-ip "$XRAY_LISTEN_IP" \
     || warn "mangle OUTPUT TPROXY failed (likely kernel/nf_tables limitation; daemon UDP DNS will go direct via host NIC, TCP still proxied)"
 }
 
@@ -597,6 +618,19 @@ install_output_rules
 log "installing TPROXY routing rules (fwmark=${TPROXY_MARK} → table ${TPROXY_TABLE} → local)"
 install_tproxy_routes
 install_masquerade_peers
+
+# Bind XRAY_LISTEN_IP to lo so DNAT/TPROXY to that address resolves
+# to a local socket. Idempotent: `ip addr show` exits 0 if the
+# secondary IP is already there (filter + grep returns the matching
+# line), so the add is skipped. The kernel auto-installs a `local`
+# route for any address on lo, so no extra `ip route add local …` is
+# needed.
+if ip -4 addr show dev lo | grep -qF " ${XRAY_LISTEN_IP}/"; then
+  log "XRAY_LISTEN_IP ${XRAY_LISTEN_IP} already on lo; skipping"
+else
+  ip -4 addr add "${XRAY_LISTEN_IP}/32" dev lo || die "failed to add ${XRAY_LISTEN_IP} to lo (required for xray inbound; see AGENTS.md 'xray is the exit')"
+  log "added ${XRAY_LISTEN_IP}/32 to lo for xray inbound"
+fi
 
 # Persist the running iptables ruleset (nat + mangle + filter)
 # across reboots via wgserver-iptables.service. iptables-save
@@ -699,7 +733,7 @@ db:
 # wg0.conf MUST contain zero [Peer] sections. All client traffic
 # is transparently redirected to a local xray-core (VLESS Reality)
 # via iptables (PREROUTING -i wg0 + OUTPUT --uid-owner
-# wgserver → 127.0.0.1:10808). xray runs as the xray system user
+# wgserver → ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT}). xray runs as the xray system user
 # and reads /etc/xray/config.json (operator-managed).
 clients:
   interface: "wg0"
@@ -835,7 +869,7 @@ Group=xray
 # on its listening socket — which lets getsockopt(SO_ORIGINAL_DST)
 # return the original destination of a connection that iptables NAT
 # REDIRECT'd to this listener. Without it, dokodemo-door inbound sees
-# every connection with destination = 127.0.0.1:10808 and cannot
+# every connection with destination = ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT} and cannot
 # figure out where the client actually wanted to go, so it just
 # closes the socket (and the client gets RST). NoNewPrivileges is
 # off because it would block AmbientCapabilities.

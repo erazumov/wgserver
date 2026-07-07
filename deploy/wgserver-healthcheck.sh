@@ -31,6 +31,8 @@
 #                          `id -u wgserver`, falls back to 999)
 #   XRAY_INBOUND_PORT   — port xray dokodemo-door listens on
 #                          (default: 10808)
+#   XRAY_LISTEN_IP      — xray inbound listen IP (default: 192.0.2.1,
+#                          must match XRAY_LISTEN_IP in install.sh)
 #   TPROXY_MARK         — fwmark used for TPROXY rules (default: 0x1)
 #   TPROXY_TABLE        — routing table for TPROXY-marked packets
 #                          (default: 100)
@@ -48,6 +50,7 @@ EXPECTED_PUBLIC_IP=${EXPECTED_PUBLIC_IP:-}
 EXPECTED_VLESS_IP=${EXPECTED_VLESS_IP:-}
 WGSERVER_UID=${WGSERVER_UID:-$(id -u wgserver 2>/dev/null || echo 999)}
 XRAY_INBOUND_PORT=${XRAY_INBOUND_PORT:-10808}
+XRAY_LISTEN_IP=${XRAY_LISTEN_IP:-192.0.2.1}
 TPROXY_MARK=${TPROXY_MARK:-0x1}
 TPROXY_TABLE=${TPROXY_TABLE:-100}
 WARN_AGE_HOURS=${WARN_AGE_HOURS:-24}
@@ -215,10 +218,15 @@ else
 
   listen=$(jq -r '.inbounds[0].listen // ""' "$XRAY_CONF")
   port=$(jq -r '.inbounds[0].port // ""' "$XRAY_CONF")
-  if [ "$listen" = "127.0.0.1" ] && [ "$port" = "$XRAY_INBOUND_PORT" ]; then
-    record "inbound[0] listen 127.0.0.1:$XRAY_INBOUND_PORT" ok
+  # The expected xray listen IP is hard-coded in deploy/install.sh
+  # (XRAY_LISTEN_IP). We only check it if the constant is set in
+  # this script; older healthcheck versions used 127.0.0.1.
+  expected_listen="${XRAY_LISTEN_IP:-127.0.0.1}"
+  if [ "$listen" = "$expected_listen" ] && [ "$port" = "$XRAY_INBOUND_PORT" ]; then
+    record "inbound[0] listen $expected_listen:$XRAY_INBOUND_PORT" ok
   else
-    record "inbound[0] listen 127.0.0.1:$XRAY_INBOUND_PORT" fail "got $listen:$port"
+    record "inbound[0] listen $expected_listen:$XRAY_INBOUND_PORT" fail "got $listen:$port" \
+      "edit $XRAY_CONF: set inbounds[0].listen to $expected_listen (matches XRAY_LISTEN_IP in install.sh; see AGENTS.md 'xray is the exit')"
   fi
 
   follow=$(jq -r '.inbounds[0].settings.followRedirect // false' "$XRAY_CONF")
