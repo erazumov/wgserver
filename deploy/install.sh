@@ -502,6 +502,18 @@ FIRST_INBOUND_NET=$(jq -r '.inbounds[0].settings.network // ""' "$XRAY_CONF")
 [ "$FIRST_INBOUND_NET" = "tcp,udp" ] \
   || warn "first inbound settings.network is \"${FIRST_INBOUND_NET}\" (recommended \"tcp,udp\" to cover both client traffic types)"
 
+# Reject streamSettings.sockopt.tproxy on the dokodemo inbound. In xray
+# v26.x the TCP TPROXY code path (tcpWorker.callback) sets
+# `dest = conn.LocalAddr()`, which makes w.hub.Addr() == dest.NetAddr()
+# always true and trips the loopback check — every TCP packet gets
+# "loopback connection detected" and dropped. We use DNAT for TCP
+# (where SO_ORIGINAL_DST returns the real dst) and TPROXY for UDP
+# only. If the operator set tproxy here, they likely had the bug
+# we hit and need to remove it.
+FIRST_INBOUND_TPROXY=$(jq -r '.inbounds[0].streamSettings.sockopt.tproxy // ""' "$XRAY_CONF" 2>/dev/null)
+[ -n "$FIRST_INBOUND_TPROXY" ] && [ "$FIRST_INBOUND_TPROXY" != "Off" ] \
+  && die "first inbound streamSettings.sockopt.tproxy is set to \"$FIRST_INBOUND_TPROXY\" — this triggers xray v26.x's TCP loopback check and drops every TCP packet. Remove the tproxy key (use defaults). See AGENTS.md 'xray is the exit'."
+
 log "xray config validated: dokodemo-door on ${XRAY_LISTEN_IP}:${XRAY_INBOUND_PORT}"
 
 # Verify that every VLESS outbound's vnext address is resolvable
@@ -544,10 +556,18 @@ chmod 0640 "$XRAY_CONF"
 # Two transports, one per protocol family, because they have
 # different kernel requirements:
 #
-#   TCP: iptables -t nat -j REDIRECT (nat table)
+#   TCP: iptables -t nat -j DNAT (nat table, to $XRAY_LISTEN_IP)
 #     — for TCP, getsockopt(SO_ORIGINAL_DST) returns the
 #       pre-NAT destination, so xray can read where the client
 #       wanted to go. Works out of the box, no special routing.
+#     — NOT TPROXY. TPROXY-for-TCP in xray v26.x is broken by
+#       design: tcpWorker.callback sets `dest = conn.LocalAddr()`
+#       in the TPROXY branch (worker.go:51), which makes
+#       w.hub.Addr() == dest.NetAddr() always true and trips
+#       the loopback check with "loopback connection detected"
+#       on every TCP packet. DNAT preserves the original dst in
+#       conntrack, the un-DNAT'd response has the right src IP,
+#       and xray reads the real dst via SO_ORIGINAL_DST.
 #
 #   UDP: iptables -t mangle -j TPROXY (mangle table)
 #     — for UDP, REDIRECT only updates the post-NAT dst in
