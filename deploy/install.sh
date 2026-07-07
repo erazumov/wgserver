@@ -880,6 +880,13 @@ ${WG0_PUB}
   iptables unit: $IPTABLES_UNIT
   wg0 pubkey:    ${WG0_PUB}
 
+  client endpoint: ${WGSERVER_PUBLIC_ENDPOINT}
+                   ^ every Telegram .conf will have THIS in [Peer] Endpoint =
+                   If this is a placeholder (TEST-NET, $(hostname), empty),
+                   the operator set WGSERVER_PUBLIC_ENDPOINT wrong in deploy.env.
+                   Edit $CONF_FILE, set clients.endpoint: "...:51820",
+                   then 'sudo systemctl restart wgserver' for the bot to pick it up.
+
   Next steps:
     1) tail -f journalctl -u wgserver -u xray
     2) sudo ${BIN_PATH} create-admin -username <name>  (then enter password)
