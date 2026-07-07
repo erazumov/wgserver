@@ -705,10 +705,30 @@ cat > /etc/wgserver/tproxy-routes.sh <<'TPROXY_EOF'
 # they are loaded by this helper script from the systemd unit
 # instead of being part of /etc/wgserver/iptables.rules.
 #
-# Idempotent: the "|| true" makes re-runs on a host that already
-# has the rule a no-op rather than a failure.
+# Self-correcting: removes any pre-existing matching rule/ route
+# first, so re-runs (or partial-failure recoveries) don't pile up
+# duplicates. The earlier `set -e` was a trap — `ip ... || true`
+# would have masked any real error silently, and the `set -e`
+# couldn't catch it because the failing command was followed by
+# `|| true`.
+#
+# TPROXY_MARK and TPROXY_TABLE are hardcoded here, not passed
+# via the systemd unit's Environment=. The unit does not export
+# variables to ExecStart= scripts, and relying on a variable
+# being set by an external caller made the script silently fail
+# (the `ip` commands received empty arguments and errored out
+# with the result masked by `2>/dev/null || true`).
 set -e
+TPROXY_MARK=0x1
+TPROXY_TABLE=100
+
+# Remove any pre-existing rules (handles duplicates from earlier
+# runs where the script errored out partway, or from operators
+# who ran the script manually multiple times).
+ip -4 rule  del fwmark ${TPROXY_MARK}/${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null || true
+# Add fresh.
 ip -4 rule  add fwmark ${TPROXY_MARK}/${TPROXY_MARK} lookup ${TPROXY_TABLE} 2>/dev/null || true
+ip -4 route del local 0.0.0.0/0 dev lo table ${TPROXY_TABLE}      2>/dev/null || true
 ip -4 route add local 0.0.0.0/0 dev lo table ${TPROXY_TABLE}      2>/dev/null || true
 TPROXY_EOF
 chmod 0755 /etc/wgserver/tproxy-routes.sh
