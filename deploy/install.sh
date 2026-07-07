@@ -873,7 +873,16 @@ Group=xray
 # figure out where the client actually wanted to go, so it just
 # closes the socket (and the client gets RST). NoNewPrivileges is
 # off because it would block AmbientCapabilities.
-AmbientCapabilities=CAP_NET_ADMIN
+#
+# CAP_NET_ADMIN gives setsockopt(IP_TRANSPARENT) (needed for TPROXY
+# UDP forging and the non-local bind in dokodemo's FakeUDP path).
+# CAP_NET_BIND_SERVICE lets the xray user bind to privileged
+# destination ports (<1024) for the UDP return path: when the
+# peer does a DNS query to 1.1.1.1:53, xray has to send the
+# response from 1.1.1.1:53 (the original dst) — without
+# CAP_NET_BIND_SERVICE the bind() returns EACCES and the
+# connection ends with "fake: socket bind: permission denied".
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 LimitNPROC=10000
 LimitNOFILE=1000000
 ExecStart=$XRAY_PREFIX/xray run -config $XRAY_CONF
