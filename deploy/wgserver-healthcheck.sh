@@ -299,13 +299,15 @@ fi
 # ip rule + route (TPROXY delivery)
 # -----------------------------------------------------------------------------
 header "TPROXY routing"
-if ip rule show 2>/dev/null | grep -qE "fwmark ${TPROXY_MARK}/${TPROXY_MARK}[[:space:]]+lookup[[:space:]]+${TPROXY_TABLE}\b"; then
+ip_rules=$(ip rule show 2>/dev/null) || true
+if [[ "$ip_rules" =~ fwmark[[:space:]]+${TPROXY_MARK}/${TPROXY_MARK}[[:space:]]+lookup[[:space:]]+${TPROXY_TABLE}([[:space:]]|$) ]]; then
   record "ip rule: fwmark $TPROXY_MARK/$TPROXY_MARK lookup $TPROXY_TABLE" ok
 else
   record "ip rule: fwmark $TPROXY_MARK/$TPROXY_MARK lookup $TPROXY_TABLE" fail "missing" \
     "systemctl restart wgserver-iptables (runs tproxy-routes.sh)"
 fi
-if ip route show table "$TPROXY_TABLE" 2>/dev/null | grep -qE "^local (default|0\.0\.0\.0/0) dev lo"; then
+ip_table=$(ip route show table "$TPROXY_TABLE" 2>/dev/null) || true
+if [[ "$ip_table" =~ ^local[[:space:]]+(default|0\.0\.0\.0/0)[[:space:]]+dev[[:space:]]+lo ]]; then
   record "ip route table $TPROXY_TABLE: local 0.0.0.0/0 dev lo" ok
 else
   record "ip route table $TPROXY_TABLE: local 0.0.0.0/0 dev lo" fail "missing"
