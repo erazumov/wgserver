@@ -102,3 +102,29 @@ internal/
 - [x] HTMX-ified create-form (csrf meta is in place, ready to wire).
 - [x] Preshared key in admin-created peers.
 - [x] Switch exit from WireGuard to xray-core (VLESS Reality transparent proxy via iptables REDIRECT).
+
+## Working server (operator note for AI agents)
+
+Hostnames and IP addresses that appear in shell output or in
+configuration files (`taigaproxy`, `167333`, `167333.com`,
+`89.191.225.59`, `89.125.75.183`, etc.) are **environment-specific
+labels**, not project-level constants. They describe the
+operator's current host, not "the wgserver" in some abstract
+sense. AI agents working on this codebase should not:
+
+- assume a particular hostname refers to a known server
+- use hostnames from prior output as if they were canonical
+- infer operator environment from accidental mentions in stdout
+
+The working server is named explicitly by the operator when
+they invoke the agent ("work on taigaproxy", "switch to
+vpn-prod-2", "the live one is 203.0.113.10"). If the operator
+does not name one, ask. The current working host is whatever
+the operator last said it is — there is no default.
+
+In the codebase itself, hostnames and public IPs are placeholders
+(`vpn.example.com`, `203.0.113.10`, `10.0.1.X`). Treat them as
+opaque labels. Do not "fix" them, do not extract them as if
+they were real values, do not infer properties of a specific
+host from them.
+

@@ -136,16 +136,28 @@ WG_BINARY=${1:-${WGSERVER_BINARY}}
 # Resolve the [Peer] Endpoint value used in every client .conf.
 # Public IP / FQDN that the *client* dials — not the listen addr
 # (which is set by wg-quick on the wireguard interface directly).
+#
+# We die on three obviously-bad values rather than silently
+# continuing with a guess:
+#   1. empty                    — operator forgot to set the env var
+#   2. RFC 5737 TEST-NET ranges  — these are documentation-only IPs
+#                                  that do not route, and silently
+#                                  produce .conf files that connect
+#                                  to nowhere
+#   3. $(hostname):51820 fallback — the legacy default, which only
+#                                  works if the operator's hostname
+#                                  is a public FQDN (almost never)
 if [ -z "$WGSERVER_PUBLIC_ENDPOINT" ]; then
-  # No env var set. Default to $(hostname) but warn loudly: the
-  # short hostname is almost never a valid public endpoint. The
-  # operator should set WGSERVER_PUBLIC_ENDPOINT on next run.
-  DEFAULT_ENDPOINT="$(hostname):51820"
-  warn "WGSERVER_PUBLIC_ENDPOINT not set; falling back to \"$DEFAULT_ENDPOINT\"."
-  warn "    If \"$(hostname)\" is a short local name (not a public FQDN or IP),"
-  warn "    every .conf handed out by the Telegram bot will be useless."
-  warn "    Fix: re-run with WGSERVER_PUBLIC_ENDPOINT=<public-ip-or-fqdn>:51820"
-  WGSERVER_PUBLIC_ENDPOINT="$DEFAULT_ENDPOINT"
+  die "WGSERVER_PUBLIC_ENDPOINT is not set. Refusing to install with a guess — every .conf handed out by the Telegram bot would have a wrong endpoint. Set the env var to a public IP or FQDN (e.g. 89.191.225.59:51820) and re-run."
+fi
+case "$WGSERVER_PUBLIC_ENDPOINT" in
+  192.0.2.*|198.51.100.*|203.0.113.*)
+    die "WGSERVER_PUBLIC_ENDPOINT=$WGSERVER_PUBLIC_ENDPOINT is in a TEST-NET range (RFC 5737) — these are documentation-only IPs that do not route. Set a real public IP or FQDN."
+    ;;
+esac
+short_host=$(hostname -s 2>/dev/null || hostname)
+if [ "$WGSERVER_PUBLIC_ENDPOINT" = "${short_host}:51820" ]; then
+  die "WGSERVER_PUBLIC_ENDPOINT=$WGSERVER_PUBLIC_ENDPOINT is the \$(hostname):51820 fallback — likely a copy-pasted example. Set a real public IP or FQDN, not the local hostname."
 fi
 
 # -----------------------------------------------------------------------------
@@ -622,7 +634,18 @@ chmod 0750 "$ETC_XRAY"
 # 10. binary
 # -----------------------------------------------------------------------------
 log "installing binary to $BIN_PATH"
-install -m 0755 "$WG_BINARY" "$BIN_PATH"
+# When the operator passes the same path as both source ($1) and
+# destination ($BIN_PATH) — e.g. `bash install.sh /usr/local/bin/wgserver`
+# to reinstall in place — GNU install refuses with 'are the same file'.
+# Detect and handle: just ensure the file is executable.
+src_real=$(readlink -f "$WG_BINARY" 2>/dev/null || echo "$WG_BINARY")
+dst_real=$(readlink -f "$BIN_PATH" 2>/dev/null || echo "$BIN_PATH")
+if [ "$src_real" = "$dst_real" ]; then
+  log "binary already at $BIN_PATH (same as source); chmod 0755, no copy"
+  chmod 0755 "$BIN_PATH"
+else
+  install -m 0755 "$WG_BINARY" "$BIN_PATH"
+fi
 
 # -----------------------------------------------------------------------------
 # 11. wgserver.env
