@@ -216,16 +216,7 @@ REDIRECT rule is missing — re-apply `wgserver-iptables.service`
 ## Health check
 
 A comprehensive diagnostic script is provided at
-`deploy/wgserver-healthcheck.sh`. Run as root after install
-(or any time something looks off):
-
-```bash
-sudo bash deploy/wgserver-healthcheck.sh
-# or with machine-readable JSON:
-sudo bash deploy/wgserver-healthcheck.sh --json
-```
-
-The script checks ~25 conditions across:
+`deploy/wgserver-healthcheck.sh`. It checks ~25 conditions across:
 
 - **Preflight** — `wg`, `iptables`, `jq`, `ss`, `ip`, `systemctl`, `curl`
 - **systemd** — `xray`, `wgserver`, `wg-quick@wg0`, `wgserver-iptables`
@@ -246,6 +237,269 @@ plus a summary line. Exit codes: `0` all OK, `1` at least one FAIL,
 `2` only WARN. The script is **strictly read-only** — it never writes
 to any operator-controlled file. Set `NO_NET=1` to skip the two
 `ifconfig.io` checks in air-gapped environments.
+
+### How to run it on the server
+
+The script is in the repo, not on the host. After install, get it
+onto the server once and put it somewhere stable:
+
+```bash
+# from the mac (or wherever you build):
+scp deploy/wgserver-healthcheck.sh root@vpn.example.com:/usr/local/bin/wgserver-healthcheck
+
+# on the server:
+chmod +x /usr/local/bin/wgserver-healthcheck
+```
+
+Then any time you suspect something is off:
+
+```bash
+# from the server (or via ssh):
+sudo wgserver-healthcheck
+# or for a script-friendly machine-readable output:
+sudo wgserver-healthcheck --json | jq
+```
+
+The script can also be run via `deploy.sh` automatically on every
+deploy by adding a one-liner at the end of your deploy script:
+
+```bash
+ssh "$DEPLOY_HOST" "wgserver-healthcheck" || exit 1
+```
+
+(That makes a failed healthcheck fail the deploy, so a broken
+upgrade never silently leaves a half-working host.)
+
+## Client-side diagnostics (after activating the .conf)
+
+Most "the VPN doesn't work" complaints fall into a small number of
+buckets. Walk through these in order — each step tests one layer
+of the stack, and a failure at step N makes step N+1 meaningless.
+
+Throughout, replace `10.0.1.X` with the IP your .conf assigned
+(it's in the `[Interface] Address = ...` line) and `10.0.1.1` with
+the wgserver's wg IP (in the server's `wgserver.yaml`,
+`clients.address`).
+
+### Step 0: can the client even reach the server?
+
+Before debugging the tunnel, verify the underlying UDP/51820 path
+is open. From the client (Mac/Linux):
+
+```bash
+# can the client TCP-ping the endpoint? (TCP; some firewalls let
+# ICMP through but block UDP)
+nc -zuv vpn.example.com 51820
+# should print "Connection to vpn.example.com 51820 port [udp/*] succeeded!"
+
+# alternative: just try the WireGuard app. If it can't even reach
+# the endpoint, the issue is firewall / NAT / wrong endpoint, NOT
+# the proxy.
+```
+
+If this fails:
+- **Endpoint is wrong** — check the `[Peer] Endpoint = ...` line in
+  the .conf. `WGSERVER_PUBLIC_ENDPOINT` must be set to a public IP
+  or FQDN that resolves from the client's network.
+- **UDP 51820 is blocked** — by the client's ISP, by a corporate
+  firewall, by a hotel/airport WiFi. Try a different network
+  (phone hotspot is a good test), or add `ListenPort = 53` to
+  the server's wg0.conf (sacrifices DNS, but works behind most
+  captive portals).
+- **Server firewall** — on the server, `ss -ulnp | grep 51820`
+  must show wg-quick listening, and the cloud security group
+  must allow UDP 51820 from the public internet.
+
+### Step 1: is the tunnel actually up?
+
+On the **client** (Mac: WireGuard app → log; Linux: `sudo wg show`):
+
+```bash
+# Linux:
+sudo wg show
+# look for the peer block. You're good if:
+#   latest handshake: 1 minute, 23 seconds ago   (< 2 min = fresh)
+#   transfer: 1.23 KiB received, 4.56 KiB sent  (non-zero)
+```
+
+On the **server**:
+
+```bash
+# per-peer view (replace PUBKEY with the peer's PublicKey from the .conf)
+sudo wg show wg0
+sudo wg show wg0 latest-handshakes
+sudo wg show wg0 transfer
+```
+
+If `latest handshake` is empty or older than 2 minutes:
+- **PubKey mismatch** — the .conf's `[Peer] PublicKey` does not
+  match the wgserver's wg0 public key (`wg show wg0 public-key`
+  on the server, `public_key: ...` in `wgserver.yaml`).
+- **PSK mismatch** — the .conf's `PresharedKey` does not match
+  the wgserver's per-peer PSK (in the DB; visible in admin UI).
+  Re-claim the .conf and try again.
+- **AllowedIPs doesn't cover 0.0.0.0/0** — your .conf should
+  have `AllowedIPs = 0.0.0.0/0, ::/0` for full-tunnel. If it's
+  `10.0.1.2/32` only, the tunnel is up but only sees wgserver
+  itself.
+
+If `transfer: 0 B received, 0 B sent`:
+- the handshake completed but no traffic is flowing. Usually a
+  routing issue on the client (next step).
+
+### Step 2: does the client have a tunnel IP?
+
+On the **client**:
+
+```bash
+# Linux:
+ip addr show | grep -A1 'wg\|tun\|utun'
+# or
+ip route get 10.0.1.1
+# should report a route via the wg interface (e.g. "dev wg0" or
+# "dev utun3")
+
+# Mac: System Settings → Network → WireGuard → "Connected"
+# shows the assigned IP. Or:
+ifconfig | grep -A1 utun
+```
+
+If no IP is assigned:
+- the .conf failed to import cleanly. Re-import it and watch
+  the WireGuard app's log.
+- the `[Interface] Address` line in the .conf is missing or
+  malformed. Must be a CIDR like `10.0.1.2/32`.
+
+### Step 3: can the client reach the wgserver's wg IP?
+
+This is the first "is the tunnel actually moving packets" test.
+If this fails, nothing else matters.
+
+```bash
+# from the client:
+ping -c 3 -W 2 10.0.1.1
+# or on macOS:
+ping -c 3 10.0.1.1
+```
+
+If this fails:
+- the wg server isn't answering. On the **server**:
+  ```bash
+  sudo wg show wg0
+  # the peer's transfer counter should be increasing as you ping
+  # if it isn't, packets are not arriving on the server at all
+  ```
+- AllowedIPs on the server side doesn't include the client's
+  IP. The wgserver syncer should have set `allowed-ips 10.0.1.X/32`
+  automatically; check `sudo wg show wg0 allowed-ips`.
+- icmp is blocked on the server. Debian default is ACCEPT for
+  the FORWARD chain, so this shouldn't happen, but if you have
+  a custom INPUT chain that drops icmp, allow it.
+
+### Step 4: does DNS work through the tunnel?
+
+This is where the UDP TPROXY path is exercised.
+
+```bash
+# from the client (force DNS over the tunnel — this skips the
+# system's default resolver and tests that 1.1.1.1 is reachable
+# THROUGH the tunnel):
+dig +time=5 +tries=1 @1.1.1.1 example.com
+nslookup example.com 1.1.1.1
+```
+
+If DNS works → the full UDP path is alive (iptables TPROXY +
+ip rule + ip route + xray → VLESS).
+
+If DNS hangs:
+- on the **server**, check:
+  ```bash
+  sudo iptables -t mangle -S | grep TPROXY
+  # must show:
+  #   -A PREROUTING -i wg0 -p udp -j TPROXY --tproxy-mark 0x1/0x1 --on-port 10808
+
+  ip rule show | grep fwmark
+  # must show: 100: from all fwmark 0x1/0x1 lookup 100
+
+  ip route show table 100
+  # must show: local 0.0.0.0/0 dev lo
+  ```
+  If any of these is missing, run `deploy/wgserver-healthcheck.sh`
+  for the full diagnostic.
+- The client may have a stale DNS cache. Disconnect the VPN,
+  `sudo dscacheutil -flushcache` (macOS) or `sudo resolvectl
+  flush-caches` (Linux), reconnect.
+
+### Step 5: does traffic actually go through the VLESS proxy?
+
+```bash
+# from the client:
+curl -sS --max-time 10 https://ifconfig.io
+# or for a faster check:
+curl -sS --max-time 10 https://api.ipify.org
+```
+
+If the IP returned equals the **server's** public IP → the proxy
+is not working; traffic is leaking out via the host's main NIC
+or your local network. The most common cause is that
+`wgserver-iptables.service` wasn't reloaded after a wgserver
+restart — the daemon's traffic (and client traffic) is going
+direct instead of through xray.
+
+If the IP returned is a **different IP** (the VLESS server's) →
+the proxy is working. You can verify by:
+```bash
+# run the same check 3 times in a row; if the IP changes each
+# time, the VLESS server has a rotating IP (CDN). If it's stable,
+# it's the VLESS server's real IP.
+for i in 1 2 3; do curl -sS --max-time 5 https://ifconfig.io; done
+```
+
+### Step 6: specific protocol/port issues
+
+If everything above works but a specific app/protocol doesn't:
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `curl https://example.com` works, but `ssh user@host` hangs | MTU too high (default 1500, but with VLESS encapsulation needs ~1400) | Add `MTU = 1380` to the client's `[Interface]` and re-activate the .conf |
+| Some sites load, others don't (esp. sites with large cookies, websockets) | MTU / MSS clamping | Same as above. `MTU = 1280` is a safer universal value |
+| DNS works but `https://` sites give "connection reset" | ECN / DSCP bits being mangled along the path | `Table = off` was the old way; for transparent proxy just set `MTU = 1380` |
+| Voice/video calls drop every ~2 min | NAT timeout on the WG path is too short | Add `PersistentKeepalive = 25` (already in our generated .conf) |
+| Telegram works but WhatsApp doesn't | Some services block known VPN/proxy IP ranges | Test with the host's own IP (turn VPN off) — if it works without VPN, the IP is blocked, not the proxy |
+| Random high latency spikes | VLESS server is overloaded or far | Try a different VLESS server, or split-tunnel: in the .conf change `AllowedIPs = 10.0.1.0/24, <some-specific-subnet>` to route only specific subnets through the tunnel |
+
+### On-the-server live debugging
+
+When a client reports problems, the most useful real-time view on
+the server is:
+
+```bash
+# watch wg0 handshakes and transfer in real time
+watch -n 1 'sudo wg show wg0'
+
+# watch xray activity (which destinations clients are trying to reach,
+# and whether VLESS handshake succeeded for each)
+sudo journalctl -u xray -f | grep -E 'accepted|tunneling|reject'
+
+# watch wgserver syncer (peer creation / removal from admin UI / bot)
+sudo journalctl -u wgserver -f
+
+# check that the daemon's own outbound goes through xray (sanity)
+sudo -u wgserver curl -sS --max-time 5 https://ifconfig.io
+# should return the VLESS server's IP, not the host's
+
+# full diagnostic (the healthcheck script)
+sudo wgserver-healthcheck
+```
+
+If a client is connected but traffic isn't flowing:
+```bash
+# on the server, check the peer's rx counter — is it increasing?
+sudo wg show wg0 transfer
+# the peer's "received" counter should grow when the client pings
+# or sends traffic. If it stays at 0, packets are not arriving
+# (firewall? client AllowedIPs?).
+```
 
 ## Common issues
 
